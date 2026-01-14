@@ -79,14 +79,6 @@ if "case_confirmed" not in st.session_state:
 if "openai_api_key" not in st.session_state:
     st.session_state.openai_api_key = ""
 
-# 使用者身分相關的 session state
-if "user_identity" not in st.session_state:
-    st.session_state.user_identity = "醫學生"
-if "user_group" not in st.session_state:
-    st.session_state.user_group = "第1組"
-if "user_serial" not in st.session_state:
-    st.session_state.user_serial = "1"
-
 
 def reset_to_case_selection():
     """返回教案選擇頁面"""
@@ -124,34 +116,6 @@ if not st.session_state.case_confirmed:
     if not has_api_key:
         st.info("尚未輸入 API Key：請先輸入後再選擇教案。")
 
-    # 使用者身分選單
-    st.subheader("👤 使用者資訊")
-    user_cols = st.columns(3)
-    with user_cols[0]:
-        st.session_state.user_identity = st.selectbox(
-            "使用者身分",
-            options=["醫學生", "臨床教師", "測試者", "其他"],
-            index=["醫學生", "臨床教師", "測試者", "其他"].index(st.session_state.user_identity),
-            help="請選擇您的身分類別"
-        )
-    with user_cols[1]:
-        group_options = [f"第{i}組" for i in range(1, 19)]
-        st.session_state.user_group = st.selectbox(
-            "組別",
-            options=group_options,
-            index=group_options.index(st.session_state.user_group) if st.session_state.user_group in group_options else 0,
-            help="請選擇您的組別（第1組~第18組）"
-        )
-    with user_cols[2]:
-        serial_options = [str(i) for i in range(1, 11)]
-        st.session_state.user_serial = st.selectbox(
-            "序號",
-            options=serial_options,
-            index=serial_options.index(st.session_state.user_serial) if st.session_state.user_serial in serial_options else 0,
-            help="請選擇您的序號（1-10）"
-        )
-
-    st.markdown("---")
     st.subheader("請選擇練習教案")
     st.markdown("每個教案有獨立的對話情境和評分標準。選擇後將進入對應的模擬對話。")
     st.markdown("")
@@ -253,8 +217,6 @@ elif selected_case == "abdominal_pain":
         compose_system_prompt as case_compose_system_prompt,
         TRANSCRIPTS_DIR,
         CONTEXT_EMBEDDINGS_PATH,
-        LAB_DATA,
-        CT_IMAGES,
     )
     from session_logger import SessionLogger
     
@@ -342,8 +304,6 @@ if "admin_mode" not in st.session_state:
     st.session_state.admin_mode = False
 if "logged_this_session" not in st.session_state:
     st.session_state.logged_this_session = False
-if "steps_feedback" not in st.session_state:
-    st.session_state.steps_feedback = None
 if "spikes_feedback" not in st.session_state:
     st.session_state.spikes_feedback = None
 if "shair_feedback" not in st.session_state:
@@ -673,68 +633,6 @@ def request_evaluation():
     st.session_state.pending_evaluation = True
 
 
-def build_steps_feedback(stage: str, strengths: List[Dict[str, Any]], gaps: List[Dict[str, Any]], conversation_text: str) -> str:
-    """產生 STEPS 模式回饋"""
-    def join_items(items):
-        names = [item.get("項目") for item in items if item.get("項目")]
-        return "、".join(names) if names else "尚未顯著項目"
-
-    strength_text = join_items(strengths)
-    gap_text = join_items(gaps)
-
-    steps_prompt = f"""
-你是一位具溝通教學經驗的 OSCE 主考官，熟悉 STEPS 健康識能溝通技巧：
-S = Speak slowly & clearly（說話速度減慢，語調平穩。將訊息以重點、分段，口語化方式說明。每一段落稍微停頓，避免一次給予過多訊息）
-T = Teach-back or Show-me（回示教技巧確認病人/家屬的理解程度）
-E = Encourage questions（鼓勵病人/家屬問問題）
-P = Plain language（用簡單易懂的話，避免醫學術語）
-S = Show example（能以舉例、圖片、模型、畫圖或手冊輔助說明）
-
-請根據下列對話逐字稿與評分資訊，以 STEPS 模型對醫學生提供約 400-500 字的中文回饋。
-
-要求：
-- 以醫學生為對象，語氣具體、鼓勵且有建設性。
-- 請仔細閱讀對話逐字稿，針對醫學生說過的具體句子給出回饋。
-- 依序分成五小段輸出，每一段的開頭請明確以「S (Speak slowly & clearly)：」「T (Teach-back)：」「E (Encourage questions)：」「P (Plain language)：」「S (Show example)：」標示。
-- 每一段內容約 2-4 句完整句子。
-
-[情境階段]
-目前溝通階段：{stage}
-
-[亮點項目]
-{strength_text}
-
-[優先改善項目]
-{gap_text}
-
-[對話逐字稿]
-{conversation_text}
-""".strip()
-
-    try:
-        response = client.responses.create(
-            model=EVALUATION_MODEL,
-            input=[
-                {"role": "system", "content": [{"type": "input_text", "text": "你是臨床溝通技巧教師，熟悉 STEPS 健康識能溝通技巧與 OSCE 評量。"}]},
-                {"role": "user", "content": [{"type": "input_text", "text": steps_prompt}]},
-            ],
-            temperature=0.4,
-        )
-        collected = []
-        for item in getattr(response, "output", []) or []:
-            for c in getattr(item, "content", []) or []:
-                if getattr(c, "type", "") in {"output_text", "text"}:
-                    collected.append(getattr(c, "text", ""))
-        if not collected and hasattr(response, "output_text"):
-            collected.append(response.output_text)
-        text = "\n".join(t for t in collected if t).strip()
-        if text:
-            return text
-    except Exception:
-        pass
-    return f"S (Speak slowly & clearly)：在說明時建議放慢語速、分段說明。\nT (Teach-back)：可嘗試請家屬複述重點，確認理解。\nE (Encourage questions)：主動邀請家屬發問，如「您還有什麼想了解的嗎？」。\nP (Plain language)：對於 {gap_text} 的解釋可用更口語化的方式。\nS (Show example)：可利用圖示或簡單比喻輔助說明。"
-
-
 def build_spikes_feedback(stage: str, strengths: List[Dict[str, Any]], gaps: List[Dict[str, Any]], conversation_text: str) -> str:
     """產生 SPIKES 模式回饋"""
     def join_items(items):
@@ -870,25 +768,15 @@ def build_combined_report(
     emotion_mode: str,
     strengths: List[Dict[str, Any]],
     gaps: List[Dict[str, Any]],
-    steps_feedback: str,
     spikes_feedback: str,
     shair_feedback: str,
     case_name: str = "",
-    user_info: Dict[str, str] = None,
 ) -> bytes:
     """建立完整的評分報告"""
     buffer = io.StringIO()
     buffer.write("=== 對話概覽 ===\n")
     if case_name:
         buffer.write(f"教案：{case_name}\n")
-    # 使用者資訊
-    if user_info:
-        if user_info.get("identity"):
-            buffer.write(f"使用者身分：{user_info['identity']}\n")
-        if user_info.get("group"):
-            buffer.write(f"組別：{user_info['group']}\n")
-        if user_info.get("number"):
-            buffer.write(f"序號：{user_info['number']}\n")
     buffer.write(f"階段：{stage}\n")
     buffer.write(f"情緒模式：{emotion_mode}\n")
     total_seconds = get_elapsed_seconds(st.session_state.conversation_started_at)
@@ -938,11 +826,6 @@ def build_combined_report(
                 buffer.write(f"- {_clean_name(item.get('項目', ''))}\n")
         else:
             buffer.write("- 無明顯低分項目\n")
-
-        # 回饋順序：STEPS → SPIKES → SHAIR
-        buffer.write("\n=== STEPS 回饋 ===\n")
-        buffer.write(steps_feedback)
-        buffer.write("\n")
 
         buffer.write("\n=== SPIKES 回饋 ===\n")
         buffer.write(spikes_feedback)
@@ -1038,7 +921,6 @@ with st.sidebar:
         st.session_state.timer_frozen_at = None
         st.session_state.timeout_triggered = False
         st.session_state.logged_this_session = False
-        st.session_state.steps_feedback = None
         st.session_state.spikes_feedback = None
         st.session_state.shair_feedback = None
         st.rerun()
@@ -1080,18 +962,6 @@ with st.sidebar:
                 "**現況**：因腹痛 8 小時、發燒、血壓低，已在急救室輸液/氧氣。  \n"
                 "**您的角色**：長女（主要照顧者），需與醫學生討論病情與治療選項。"
             )
-        with st.expander("🧾 抽血檢驗報告", expanded=False):
-            for category, items in LAB_DATA.items():
-                st.markdown(f"**{category}**")
-                for test_name, value in items.items():
-                    st.markdown(f"- {test_name}：{value}")
-        with st.expander("🖼️ CT 影像", expanded=False):
-            for img_name in CT_IMAGES:
-                img_path = PROJECT_ROOT / img_name
-                if img_path.exists():
-                    st.image(str(img_path), use_container_width=True)
-                else:
-                    st.warning(f"找不到圖片：{img_name}")
         with st.expander("🧾 衛教重點", expanded=False):
             st.markdown(
                 "1. 腹膜透析的無菌操作（洗手、環境清潔）  \n"
@@ -1281,36 +1151,22 @@ elif st.session_state.last_evaluation:
     # 產生對話逐字稿供回饋函式使用
     conversation_text = _format_conversation_for_model(st.session_state.messages)
     
-    # 產生 STEPS、SPIKES 和 SHAIR 回饋（只在沒有時產生，避免每次 rerun 重新呼叫 API）
-    if st.session_state.steps_feedback is None or st.session_state.spikes_feedback is None or st.session_state.shair_feedback is None:
-        with st.spinner("正在產生 STEPS、SPIKES 與 SHAIR 回饋..."):
-            steps_feedback = build_steps_feedback(st.session_state.stage, strengths, gaps, conversation_text)
+    # 產生 SPIKES 和 SHAIR 回饋（只在沒有時產生，避免每次 rerun 重新呼叫 API）
+    if st.session_state.spikes_feedback is None or st.session_state.shair_feedback is None:
+        with st.spinner("正在產生 SPIKES 與 SHAIR 回饋..."):
             spikes_feedback = build_spikes_feedback(st.session_state.stage, strengths, gaps, conversation_text)
             shair_feedback = build_shair_feedback(st.session_state.stage, strengths, gaps, conversation_text)
-            st.session_state.steps_feedback = steps_feedback
             st.session_state.spikes_feedback = spikes_feedback
             st.session_state.shair_feedback = shair_feedback
     else:
-        steps_feedback = st.session_state.steps_feedback
         spikes_feedback = st.session_state.spikes_feedback
         shair_feedback = st.session_state.shair_feedback
-    
-    # 回饋順序：STEPS → SPIKES → SHAIR
-    st.markdown("**STEPS 回饋**：")
-    st.write(steps_feedback)
     
     st.markdown("**SPIKES 回饋**：")
     st.write(spikes_feedback)
     
     st.markdown("**SHAIR 回饋**：")
     st.write(shair_feedback)
-    
-    # 組合使用者資訊
-    user_info = {
-        "identity": st.session_state.get("user_identity", ""),
-        "group": st.session_state.get("user_group", ""),
-        "serial": st.session_state.get("user_serial", ""),
-    }
     
     # 產生完整報告
     combined_bytes = build_combined_report(
@@ -1320,24 +1176,18 @@ elif st.session_state.last_evaluation:
         st.session_state.emotion_mode,
         strengths,
         gaps,
-        steps_feedback,
         spikes_feedback,
         shair_feedback,
         case_name=case_info.get('name', ''),
-        user_info=user_info,
     )
     
     # 下載按鈕
     # 根據教案產生檔名前綴
     case_prefix = "鼻咽癌" if selected_case == "npc" else "腹痛" if selected_case == "abdominal_pain" else "對話"
-    # 加入使用者資訊到檔名
-    user_suffix = ""
-    if user_info.get("identity") or user_info.get("group") or user_info.get("serial"):
-        user_suffix = f"_{user_info.get('identity', '')}_{user_info.get('group', '')}_{user_info.get('serial', '')}"
     st.download_button(
         "📥 下載對話及評分回饋",
         data=combined_bytes,
-        file_name=f"{case_prefix}_評分回饋_{datetime.now().strftime('%Y%m%d_%H%M%S')}{user_suffix}.txt",
+        file_name=f"{case_prefix}_評分回饋_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
         mime="text/plain",
     )
     
@@ -1357,7 +1207,6 @@ elif st.session_state.last_evaluation:
                     combined_report_bytes=combined_bytes,
                     case_id=selected_case,
                     case_name=case_info.get('name', ''),
-                    user_info=user_info,
                 )
                 st.session_state.logged_this_session = True
                 
@@ -1392,12 +1241,10 @@ elif st.session_state.last_evaluation:
                 row.get("評分理由", ""),
             ])
         
-        # 加上 UTF-8 BOM 避免 Excel 開啟時中文亂碼
-        csv_bytes = b'\xef\xbb\xbf' + csv_buffer.getvalue().encode("utf-8")
         st.download_button(
             "📥 下載評分明細 (CSV)",
-            data=csv_bytes,
-            file_name=f"評分明細_{selected_case}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{user_suffix}.csv",
+            data=csv_buffer.getvalue().encode("utf-8"),
+            file_name=f"評分明細_{selected_case}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
     elif score_rows and not st.session_state.admin_mode:

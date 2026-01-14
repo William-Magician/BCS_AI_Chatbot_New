@@ -92,9 +92,13 @@ class SessionLogger:
         diagnosis_disclosed: bool,
         case_id: str = "",
         case_name: str = "",
+        user_info: Optional[Dict[str, str]] = None,
     ) -> Optional[Path]:
         """
         記錄一個完整的對話 session 到本地 JSON 檔案
+        
+        Args:
+            user_info: 使用者資訊（identity, group, serial）
         
         Returns:
             記錄檔案的路徑，若失敗則回傳 None
@@ -109,13 +113,23 @@ class SessionLogger:
             elif case_id == "abdominal_pain":
                 case_prefix = "腹痛_"
             
-            filename = self.logs_dir / f"{case_prefix}session_{timestamp}.json"
+            # 加入使用者資訊到檔名
+            user_suffix = ""
+            if user_info:
+                identity = user_info.get("identity", "")
+                group = user_info.get("group", "")
+                serial = user_info.get("serial", "")
+                if identity or group or serial:
+                    user_suffix = f"_{identity}_{group}_{serial}"
+            
+            filename = self.logs_dir / f"{case_prefix}session_{timestamp}{user_suffix}.json"
             
             payload = {
                 "timestamp": timestamp,
                 "datetime": datetime.now().isoformat(),
                 "case_id": case_id,
                 "case_name": case_name,
+                "user_info": user_info or {},
                 "student_level": student_level,
                 "emotion_mode": emotion_mode,
                 "stage": stage,
@@ -184,6 +198,7 @@ class SessionLogger:
         combined_report_bytes: bytes,
         case_id: str = "",
         case_name: str = "",
+        user_info: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         記錄 session 並上傳到 Google Drive
@@ -191,6 +206,7 @@ class SessionLogger:
         Args:
             case_id: 教案識別碼（如 'npc', 'abdominal_pain'）
             case_name: 教案名稱（如 '鼻咽癌 - 病情告知'）
+            user_info: 使用者資訊（identity, group, serial）
         
         Returns:
             包含 local_path, drive_file_id, report_drive_id 的字典
@@ -209,6 +225,15 @@ class SessionLogger:
         elif case_id == "abdominal_pain":
             case_prefix = "腹痛_"
         
+        # 加入使用者資訊到檔名
+        user_suffix = ""
+        if user_info:
+            identity = user_info.get("identity", "")
+            group = user_info.get("group", "")
+            serial = user_info.get("serial", "")
+            if identity or group or serial:
+                user_suffix = f"_{identity}_{group}_{serial}"
+        
         # 1. 儲存本地 JSON log
         local_path = self.log_session(
             messages=messages,
@@ -221,6 +246,7 @@ class SessionLogger:
             diagnosis_disclosed=diagnosis_disclosed,
             case_id=case_id,
             case_name=case_name,
+            user_info=user_info,
         )
         result["local_path"] = str(local_path) if local_path else None
         
@@ -233,7 +259,7 @@ class SessionLogger:
         if combined_report_bytes:
             try:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                report_filename = self.logs_dir / f"{case_prefix}report_{timestamp}.txt"
+                report_filename = self.logs_dir / f"{case_prefix}report_{timestamp}{user_suffix}.txt"
                 report_filename.write_bytes(combined_report_bytes)
                 
                 if self.drive_service:
