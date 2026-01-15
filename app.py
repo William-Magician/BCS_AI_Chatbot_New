@@ -1,6 +1,7 @@
 """
 OSCE 醫病對話模擬器 - 多教案整合版
 在進入對話前選擇教案，每個教案有獨立的 context engine 確保不會互相影響
+支援語音對話：語音輸入（Whisper）+ 語音回覆（TTS）
 """
 
 import csv
@@ -9,6 +10,7 @@ import json
 import os
 import sys
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -87,6 +89,18 @@ if "user_group" not in st.session_state:
 if "user_serial" not in st.session_state:
     st.session_state.user_serial = "1"
 
+# 語音模式相關的 session state
+if "voice_mode" not in st.session_state:
+    st.session_state.voice_mode = False  # False=文字模式, True=語音模式
+if "voice_messages" not in st.session_state:
+    st.session_state.voice_messages = []
+if "voice_duration" not in st.session_state:
+    st.session_state.voice_duration = 0
+if "voice_conversation_ended" not in st.session_state:
+    st.session_state.voice_conversation_ended = False
+if "voice_selected" not in st.session_state:
+    st.session_state.voice_selected = "shimmer"
+
 
 def reset_to_case_selection():
     """返回教案選擇頁面"""
@@ -99,10 +113,25 @@ def reset_to_case_selection():
         "diagnosis_disclosed", "conversation_started_at", "timer_frozen_at",
         "timeout_triggered", "logged_this_session", "admin_mode",
         "context_engine", "case_config",
+        # 語音模式相關
+        "voice_mode", "voice_messages", "voice_duration",
+        "voice_conversation_ended", "voice_selected",
     ]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
+
+
+def reset_voice_mode():
+    """重置語音模式對話"""
+    st.session_state.voice_messages = []
+    st.session_state.voice_duration = 0
+    st.session_state.voice_conversation_ended = False
+    st.session_state.last_evaluation = None
+    st.session_state.last_evaluation_error = None
+    st.session_state.steps_feedback = None
+    st.session_state.spikes_feedback = None
+    st.session_state.shair_feedback = None
 
 
 # =========================================================
@@ -975,10 +1004,51 @@ with st.sidebar:
     st.markdown(f"### 當前教案")
     st.markdown(f"**{case_info.get('icon', '')} {case_info.get('name', '')}**")
     st.caption(f"角色：{case_info.get('role', '')}")
-    # st.markdown("---") 
     
-    # if st.button("🔙 返回教案選擇", type="secondary", use_container_width=True):
-    #     reset_to_case_selection()
+    st.divider()
+    
+    # 對話模式切換
+    st.markdown("### 🎛️ 對話模式")
+    mode_options = ["💬 文字模式", "🎤 即時語音模式"]
+    current_mode_idx = 1 if st.session_state.voice_mode else 0
+    selected_mode = st.radio(
+        "選擇對話模式",
+        mode_options,
+        index=current_mode_idx,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    new_voice_mode = (selected_mode == "🎤 即時語音模式")
+    if new_voice_mode != st.session_state.voice_mode:
+        st.session_state.voice_mode = new_voice_mode
+        # 切換模式時重置計時器（語音模式有自己的計時器）
+        st.session_state.conversation_started_at = None
+        st.session_state.timer_frozen_at = None
+        # 清除評分結果
+        st.session_state.last_evaluation = None
+        st.session_state.last_evaluation_error = None
+        st.session_state.steps_feedback = None
+        st.session_state.spikes_feedback = None
+        st.session_state.shair_feedback = None
+        st.rerun()
+    
+    if st.session_state.voice_mode:
+        st.info("🎤 語音模式：使用 OpenAI Realtime API 進行即時語音對話")
+        # 語音選擇
+        voice_options = {
+            "shimmer": "Shimmer（女聲，溫和）",
+            "alloy": "Alloy（中性）",
+            "echo": "Echo（男聲）",
+            "coral": "Coral（女聲）",
+            "sage": "Sage（中性，沉穩）",
+        }
+        st.session_state.voice_selected = st.selectbox(
+            "AI 語音",
+            list(voice_options.keys()),
+            format_func=lambda x: voice_options[x],
+            index=list(voice_options.keys()).index(st.session_state.voice_selected),
+        )
+    # st.markdown("---")
     #     st.rerun()
 
     # st.markdown("---")
@@ -1001,30 +1071,36 @@ with st.sidebar:
     
     st.info(f"目前溝通階段：**{st.session_state.stage}**")
     
-    # 即時計時器
-    render_live_timer(
-        st.session_state.conversation_started_at,
-        st.session_state.timer_limit_minutes,
-        st.session_state.timeout_triggered,
-    )
+    # 語音模式下不顯示側邊欄計時器（語音介面有自己的倒數計時）
+    if not st.session_state.voice_mode:
+        # 即時計時器
+        render_live_timer(
+            st.session_state.conversation_started_at,
+            st.session_state.timer_limit_minutes,
+            st.session_state.timeout_triggered,
+        )
+        
+        # 計時器設定
+        timer_limit = st.slider(
+            "對話時間限制（分鐘，0 表示無）",
+            min_value=0,
+            max_value=40,
+            value=st.session_state.timer_limit_minutes,
+        )
+        if timer_limit != st.session_state.timer_limit_minutes:
+            st.session_state.timer_limit_minutes = timer_limit
+            st.session_state.timeout_triggered = False
+        
+        # 時間到自動產生評分
+        auto_download = st.checkbox(
+            "時間到自動產生評分",
+            value=st.session_state.auto_download_on_timeout,
+        )
+        st.session_state.auto_download_on_timeout = auto_download
+    else:
+        st.caption("⏱️ 語音模式的時間限制請在對話介面上方設定")
     
-    # 計時器設定
-    timer_limit = st.slider(
-        "對話時間限制（分鐘，0 表示無）",
-        min_value=0,
-        max_value=40,
-        value=st.session_state.timer_limit_minutes,
-    )
-    if timer_limit != st.session_state.timer_limit_minutes:
-        st.session_state.timer_limit_minutes = timer_limit
-        st.session_state.timeout_triggered = False
-    
-    # 時間到自動產生評分
-    auto_download = st.checkbox(
-        "時間到自動產生評分",
-        value=st.session_state.auto_download_on_timeout,
-    )
-    st.session_state.auto_download_on_timeout = auto_download
+    st.divider()
     
     # 重新開始
     if st.button("🔄 重新開始對話", type="primary"):
@@ -1041,6 +1117,8 @@ with st.sidebar:
         st.session_state.steps_feedback = None
         st.session_state.spikes_feedback = None
         st.session_state.shair_feedback = None
+        st.session_state.last_audio_bytes = None
+        st.session_state.last_tts_audio = None
         st.rerun()
     
     st.divider()
@@ -1178,11 +1256,585 @@ elif selected_case == "abdominal_pain":
 
 st.divider()
 
-# 顯示對話歷史
-for msg in st.session_state.messages:
-    avatar = "🧑‍⚕️" if msg["role"] == "user" else AVATAR_PATIENT
-    with st.chat_message(msg["role"], avatar=avatar):
-        st.markdown(msg["content"])
+# =========================================================
+# 語音模式的即時對話介面
+# =========================================================
+def get_voice_system_prompt(case_id: str, emotion_mode: str) -> str:
+    """語音模式專用的系統提示詞 - 使用與文字模式一致的完整背景"""
+    if case_id == "npc":
+        return f"""### 角色設定
+你是吳忠明，55 歲男性，剛收到鼻咽癌病理報告的病人。你是工程師，已婚，有兩個兒子（20歲、18歲）。
+你因為之前回診時鼻塞、耳悶、頸部有腫塊，做了鼻咽部切片檢查，今天回診看報告。
+你還不知道自己得了鼻咽癌。
+
+### 家族史（非常重要）
+- 本次回診是你自己一個人前來門診，沒有任何家屬陪同在診間。
+- 目前直系親屬（太太、小孩、父母）當中沒有人罹患癌症。
+- 但你有癌症家族史：你的叔父（爸爸的弟弟）58 歲時因鼻咽癌過世。
+- 若醫學生詢問「有沒有癌症家族史」或「家人有沒有得過癌症」，你必須主動提到這位叔父的病史。
+- 若醫學生問「現在家人有沒有癌症」，請回答目前家人沒有癌症，但過去有叔父鼻咽癌過世的家族史。
+- 【重要】請使用「叔父」這個稱呼，不要說「叔叔」。
+
+### 情緒模式
+{emotion_mode}
+
+### 回覆規則
+- 【最重要】你是病人，等待醫學生先開口。絕對不要主動先說話，必須等醫學生開始對話。
+- 只用繁體中文口語對話，保持情緒模式一致。
+- 你是病人，不是醫生，不要使用醫療術語。
+- 回答要簡短自然，1-3 句，最多 40 字。
+- 如果醫學生提到「癌」、「腫瘤」、「惡性」等字眼，表現出震驚。
+- 在醫學生揭露診斷前，聚焦於症狀感受與等待結果的不安。
+- 未從醫學生口中聽到檢查結果前，禁止自行揭露或確認已罹癌。
+- 適時表達擔心、疑問，可提及家人、經濟負擔。"""
+    
+    elif case_id == "abdominal_pain":
+        return f"""### 角色設定
+你是陳志華先生的長女（主要照顧者），現在在急診室。
+爸爸 75 歲，糖尿病導致末期腎臟病，腹膜透析約兩年。
+現況：爸爸因腹痛 8 小時、發燒、血壓低，已在急救室輸液/氧氣。
+媽媽已過世多年，還有一個弟弟正在路上。
+
+### 情緒模式
+{emotion_mode}
+
+### 關於轉院的想法（非常重要）
+- 你內心一直在猶豫這家醫院能不能處理好爸爸的狀況。
+- 如果醫學生提到病情嚴重、需要手術、或風險較高，你應該主動提出：「那要不要轉到大醫院？」「這裡開刀可以嗎？會不會轉去醫學中心比較好？」
+- 即使醫學生沒有先提轉院，當對話進展到討論治療選項或手術時，你也應該在合適時機主動問。
+
+### 回覆規則
+- 【最重要】你是家屬，等待醫學生先開口。絕對不要主動先說話，必須等醫學生開始對話。
+- 只用繁體中文口語對話，保持情緒模式一致。
+- 你是家屬，不是醫生，不要使用醫療術語。
+- 回答要簡短自然，1-3 句，最多 40 字。
+- 回答要貼近真實：短句、口語，如「對」「沒有耶」「我不知道」「那現在怎麼辦」。
+- 若醫學生提到手術、麻醉風險、不手術後果、轉院等，用家屬視角追問或表達擔心。
+- 若醫學生過度保證，依情緒模式做出質疑或不安。
+- 適時表達擔心、焦慮，詢問爸爸的狀況。"""
+    
+    return "你是一位標準化病人/家屬，請用繁體中文回答。"
+
+
+def create_realtime_voice_html(api_key: str, system_prompt: str, voice: str, role_label: str, time_limit_seconds: int = 0) -> str:
+    """建立即時語音對話的 HTML 組件
+    
+    Args:
+        time_limit_seconds: 時間限制（秒），0 表示無限制
+    """
+    escaped_prompt = system_prompt.replace('`', "'").replace('$', '').replace('\\', '\\\\')
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+            .container {{ max-width: 100%; padding: 15px; }}
+            .status-bar {{
+                display: flex; align-items: center; gap: 10px;
+                padding: 10px 15px; background: #f0f2f6; border-radius: 10px; margin-bottom: 12px;
+            }}
+            .status-indicator {{ width: 12px; height: 12px; border-radius: 50%; background: #ccc; }}
+            .status-indicator.connected {{ background: #28a745; animation: pulse 2s infinite; }}
+            .status-indicator.speaking {{ background: #007bff; animation: pulse 0.5s infinite; }}
+            .status-indicator.ai-speaking {{ background: #fd7e14; animation: pulse 0.5s infinite; }}
+            @keyframes pulse {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.5; }} 100% {{ opacity: 1; }} }}
+            .controls {{ display: flex; gap: 10px; margin-bottom: 12px; }}
+            .btn {{
+                padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer;
+                font-size: 16px; font-weight: 500; transition: all 0.2s;
+            }}
+            .btn-primary {{ background: #007bff; color: white; }}
+            .btn-primary:hover {{ background: #0056b3; }}
+            .btn-danger {{ background: #dc3545; color: white; }}
+            .btn-danger:hover {{ background: #c82333; }}
+            .btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+            .transcript {{
+                max-height: 350px; overflow-y: auto; border: 1px solid #ddd;
+                border-radius: 10px; padding: 12px; background: #fafafa;
+            }}
+            .message {{ padding: 8px 12px; margin-bottom: 8px; border-radius: 10px; max-width: 85%; }}
+            .message.user {{ background: #007bff; color: white; margin-left: auto; }}
+            .message.assistant {{ background: #e9ecef; color: #333; }}
+            .message-role {{ font-size: 11px; opacity: 0.7; margin-bottom: 3px; }}
+            .timer {{ font-size: 24px; font-weight: bold; color: #333; }}
+            #audio-visualizer {{ width: 100%; height: 50px; background: #f8f9fa; border-radius: 8px; margin-bottom: 12px; }}
+            .info-box {{ background: #e7f3ff; border: 1px solid #b6d4fe; border-radius: 8px; padding: 10px; margin-bottom: 12px; font-size: 13px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="status-bar">
+                <div id="status-indicator" class="status-indicator"></div>
+                <span id="status-text">準備就緒</span>
+                <span style="margin-left: auto;" class="timer" id="timer">--:--</span>
+            </div>
+            
+            <canvas id="audio-visualizer"></canvas>
+            
+            <div class="controls">
+                <button id="start-btn" class="btn btn-primary" onclick="startConversation()">🎤 開始對話</button>
+                <button id="stop-btn" class="btn btn-danger" onclick="stopConversation()" disabled>⏹️ 結束對話</button>
+            </div>
+            
+            <div class="info-box" id="info-box"></div>
+            
+            <div class="transcript" id="transcript">
+                <div style="text-align: center; color: #666; padding: 20px;">對話記錄將顯示在這裡</div>
+            </div>
+        </div>
+        
+        <script>
+            const API_KEY = '{api_key}';
+            const SYSTEM_PROMPT = `{escaped_prompt}`;
+            const VOICE = '{voice}';
+            const ROLE_LABEL = '{role_label}';
+            const TIME_LIMIT_SECONDS = {time_limit_seconds};
+            
+            let peerConnection = null;
+            let dataChannel = null;
+            let mediaStream = null;
+            let audioContext = null;
+            let analyser = null;
+            let isRunning = false;
+            let startTime = null;
+            let timerInterval = null;
+            
+            let messageSequence = 0;
+            let messages = [];
+            let pendingUserTranscript = null;
+            let pendingAssistantTranscript = null;
+            
+            const statusIndicator = document.getElementById('status-indicator');
+            const statusText = document.getElementById('status-text');
+            const startBtn = document.getElementById('start-btn');
+            const stopBtn = document.getElementById('stop-btn');
+            const transcriptDiv = document.getElementById('transcript');
+            const timerDisplay = document.getElementById('timer');
+            const infoBox = document.getElementById('info-box');
+            const canvas = document.getElementById('audio-visualizer');
+            const canvasCtx = canvas.getContext('2d');
+            
+            // 初始化顯示
+            if (TIME_LIMIT_SECONDS > 0) {{
+                const mins = String(Math.floor(TIME_LIMIT_SECONDS / 60)).padStart(2, '0');
+                const secs = String(TIME_LIMIT_SECONDS % 60).padStart(2, '0');
+                timerDisplay.textContent = mins + ':' + secs;
+                infoBox.innerHTML = '點擊「開始對話」後允許使用麥克風，對話限時 <b>' + Math.floor(TIME_LIMIT_SECONDS / 60) + ' 分鐘</b>。';
+            }} else {{
+                timerDisplay.textContent = '00:00';
+                infoBox.textContent = '點擊「開始對話」後允許使用麥克風，然後直接說話，AI 會即時回應。';
+            }}
+            
+            // 清除之前的對話記錄
+            try {{
+                localStorage.removeItem("rt_conversation_data");
+            }} catch(e) {{}}
+            
+            function updateStatus(status, text) {{
+                statusIndicator.className = 'status-indicator ' + status;
+                statusText.textContent = text;
+            }}
+            
+            function updateTimer() {{
+                if (!startTime) return;
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                
+                // 顯示時間
+                if (TIME_LIMIT_SECONDS > 0) {{
+                    // 有時間限制時顯示倒數
+                    const remaining = Math.max(0, TIME_LIMIT_SECONDS - elapsed);
+                    const mins = String(Math.floor(remaining / 60)).padStart(2, '0');
+                    const secs = String(remaining % 60).padStart(2, '0');
+                    timerDisplay.textContent = mins + ':' + secs;
+                    
+                    // 剩餘 30 秒時變色警告
+                    if (remaining <= 30 && remaining > 0) {{
+                        timerDisplay.style.color = '#dc3545';
+                    }} else if (remaining > 30) {{
+                        timerDisplay.style.color = '#333';
+                    }}
+                    
+                    // 時間到自動停止
+                    if (remaining <= 0 && isRunning) {{
+                        timerDisplay.style.color = '#dc3545';
+                        infoBox.innerHTML = '<span style="color: #dc3545; font-weight: bold;">⏰ 時間到！對話自動結束。</span>';
+                        stopConversation();
+                        return;
+                    }}
+                }} else {{
+                    // 無時間限制時顯示經過時間
+                    const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                    const secs = String(elapsed % 60).padStart(2, '0');
+                    timerDisplay.textContent = mins + ':' + secs;
+                }}
+            }}
+            
+            function addMessage(role, content, seq) {{
+                const newMsg = {{ role: role, content: content, seq: seq }};
+                let insertIndex = messages.length;
+                for (let i = 0; i < messages.length; i++) {{
+                    if (messages[i].seq > seq) {{ insertIndex = i; break; }}
+                }}
+                messages.splice(insertIndex, 0, newMsg);
+                renderMessages();
+            }}
+            
+            function renderMessages() {{
+                transcriptDiv.innerHTML = '';
+                if (messages.length === 0) {{
+                    transcriptDiv.innerHTML = '<div style="text-align: center; color: #666; padding: 20px;">對話記錄將顯示在這裡</div>';
+                    return;
+                }}
+                const sorted = [...messages].sort((a, b) => a.seq - b.seq);
+                sorted.forEach(msg => {{
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = 'message ' + msg.role;
+                    const roleLabel = msg.role === 'user' ? '醫學生' : ROLE_LABEL;
+                    msgDiv.innerHTML = '<div class="message-role">' + roleLabel + '</div><div>' + msg.content + '</div>';
+                    transcriptDiv.appendChild(msgDiv);
+                }});
+                transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+            }}
+            
+            function visualize() {{
+                if (!analyser || !isRunning) return;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteFrequencyData(dataArray);
+                canvas.width = canvas.offsetWidth;
+                canvas.height = 50;
+                canvasCtx.fillStyle = '#f8f9fa';
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                const barWidth = (canvas.width / bufferLength) * 2.5;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {{
+                    const barHeight = (dataArray[i] / 255) * canvas.height;
+                    canvasCtx.fillStyle = 'rgb(0, 123, ' + Math.min(255, barHeight + 100) + ')';
+                    canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                    x += barWidth + 1;
+                }}
+                requestAnimationFrame(visualize);
+            }}
+            
+            async function startConversation() {{
+                try {{
+                    if (!API_KEY || !API_KEY.startsWith('sk-')) {{
+                        throw new Error('API Key 格式不正確');
+                    }}
+                    
+                    updateStatus('', '正在連接...');
+                    infoBox.textContent = '正在建立連接...';
+                    startBtn.disabled = true;
+                    
+                    messageSequence = 0;
+                    messages = [];
+                    pendingUserTranscript = null;
+                    pendingAssistantTranscript = null;
+                    // 清除之前的對話記錄
+                    try {{ localStorage.removeItem("rt_conversation_data"); }} catch(e) {{}}
+                    renderMessages();
+                    
+                    const tokenResponse = await fetch('https://api.openai.com/v1/realtime/sessions', {{
+                        method: 'POST',
+                        headers: {{ 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ model: 'gpt-4o-realtime-preview-2024-12-17', voice: VOICE }}),
+                    }});
+                    
+                    if (!tokenResponse.ok) throw new Error('無法獲取 session token');
+                    
+                    const tokenData = await tokenResponse.json();
+                    const ephemeralKey = tokenData.client_secret.value;
+                    
+                    peerConnection = new RTCPeerConnection();
+                    
+                    const audioEl = document.createElement('audio');
+                    audioEl.autoplay = true;
+                    peerConnection.ontrack = (e) => {{ audioEl.srcObject = e.streams[0]; }};
+                    
+                    mediaStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                    peerConnection.addTrack(mediaStream.getTracks()[0], mediaStream);
+                    
+                    audioContext = new AudioContext();
+                    const source = audioContext.createMediaStreamSource(mediaStream);
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 256;
+                    source.connect(analyser);
+                    
+                    dataChannel = peerConnection.createDataChannel('oai-events');
+                    dataChannel.onopen = () => {{
+                        dataChannel.send(JSON.stringify({{
+                            type: 'session.update',
+                            session: {{ 
+                                instructions: SYSTEM_PROMPT, 
+                                input_audio_transcription: {{ 
+                                    model: 'whisper-1',
+                                    language: 'zh'
+                                }}
+                            }}
+                        }}));
+                    }};
+                    
+                    dataChannel.onmessage = (e) => handleServerEvent(JSON.parse(e.data));
+                    
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+                    
+                    const sdpResponse = await fetch('https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {{
+                        method: 'POST',
+                        headers: {{ 'Authorization': 'Bearer ' + ephemeralKey, 'Content-Type': 'application/sdp' }},
+                        body: offer.sdp,
+                    }});
+                    
+                    if (!sdpResponse.ok) throw new Error('無法建立 WebRTC 連接');
+                    
+                    await peerConnection.setRemoteDescription({{ type: 'answer', sdp: await sdpResponse.text() }});
+                    
+                    isRunning = true;
+                    startTime = Date.now();
+                    timerInterval = setInterval(updateTimer, 1000);
+                    
+                    updateStatus('connected', '已連接 - 請開始說話');
+                    infoBox.textContent = '連接成功！請直接說話，AI 會即時回應。';
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                    
+                    visualize();
+                    
+                }} catch (error) {{
+                    console.error('Error:', error);
+                    updateStatus('', '連接失敗');
+                    infoBox.textContent = '錯誤：' + error.message;
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                }}
+            }}
+            
+            function handleServerEvent(event) {{
+                const type = event.type;
+                
+                if (type === 'input_audio_buffer.speech_started') {{
+                    updateStatus('speaking', '您正在說話...');
+                    pendingUserTranscript = {{ seq: ++messageSequence }};
+                }}
+                else if (type === 'input_audio_buffer.speech_stopped') {{
+                    updateStatus('connected', '處理中...');
+                }}
+                else if (type === 'conversation.item.input_audio_transcription.completed') {{
+                    const transcript = event.transcript;
+                    if (transcript && pendingUserTranscript) {{
+                        addMessage('user', transcript, pendingUserTranscript.seq);
+                        pendingUserTranscript = null;
+                    }} else if (transcript) {{
+                        addMessage('user', transcript, ++messageSequence);
+                    }}
+                }}
+                else if (type === 'response.created') {{
+                    pendingAssistantTranscript = {{ seq: ++messageSequence }};
+                }}
+                else if (type === 'response.audio_transcript.done') {{
+                    const transcript = event.transcript;
+                    if (transcript && pendingAssistantTranscript) {{
+                        addMessage('assistant', transcript, pendingAssistantTranscript.seq);
+                        pendingAssistantTranscript = null;
+                    }} else if (transcript) {{
+                        addMessage('assistant', transcript, ++messageSequence);
+                    }}
+                    updateStatus('connected', '已連接 - 請繼續說話');
+                }}
+                else if (type === 'response.audio.delta') {{
+                    updateStatus('ai-speaking', 'AI 正在回答...');
+                }}
+                else if (type === 'error') {{
+                    console.error('Server error:', event.error);
+                    infoBox.textContent = '錯誤：' + (event.error?.message || '未知錯誤');
+                }}
+            }}
+            
+            let conversationData = null;
+            
+            function copyToClipboard() {{
+                if (!conversationData) return;
+                navigator.clipboard.writeText(conversationData).then(() => {{
+                    const copyBtn = document.getElementById('copy-btn');
+                    copyBtn.textContent = '✅ 已複製！';
+                    copyBtn.style.background = '#10b981';
+                    setTimeout(() => {{
+                        copyBtn.textContent = '📋 複製對話記錄';
+                        copyBtn.style.background = '#3b82f6';
+                    }}, 2000);
+                }}).catch(err => {{
+                    console.error('Failed to copy:', err);
+                    alert('複製失敗，請手動選取並複製上方對話記錄');
+                }});
+            }}
+            
+            function stopConversation() {{
+                isRunning = false;
+                if (timerInterval) clearInterval(timerInterval);
+                if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+                if (peerConnection) peerConnection.close();
+                if (audioContext) audioContext.close();
+                
+                const duration = startTime ? Math.floor((Date.now() - startTime) / 1000) : 0;
+                
+                updateStatus('', '對話已結束');
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                // 按序號排序
+                const sortedMessages = [...messages].sort((a, b) => a.seq - b.seq);
+                const data = {{
+                    messages: sortedMessages,
+                    duration: duration,
+                    timestamp: new Date().toISOString()
+                }};
+                conversationData = JSON.stringify(data);
+                
+                // 顯示複製按鈕和說明
+                infoBox.innerHTML = `
+                    <div style="text-align: center;">
+                        <p style="margin: 0 0 10px 0; font-weight: bold;">✅ 對話已結束</p>
+                        <button id="copy-btn" onclick="copyToClipboard()" style="
+                            background: #3b82f6;
+                            color: white;
+                            border: none;
+                            padding: 12px 24px;
+                            border-radius: 8px;
+                            font-size: 16px;
+                            cursor: pointer;
+                            margin-bottom: 10px;
+                        ">📋 複製對話記錄</button>
+                        <p style="margin: 0; font-size: 12px; color: #666;">
+                            點擊複製後，請貼到下方輸入框中
+                        </p>
+                    </div>
+                `;
+                
+                // 存到 localStorage（備用）
+                try {{
+                    localStorage.setItem("rt_conversation_data", conversationData);
+                }} catch(e) {{}}
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+
+
+# =========================================================
+# 根據模式顯示不同介面
+# =========================================================
+if st.session_state.voice_mode:
+    # 語音模式介面
+    st.markdown("### 🎤 即時語音對話")
+    
+    # 時間限制設定（在語音介面上方）
+    col_time1, col_time2 = st.columns([3, 1])
+    with col_time1:
+        voice_time_limit = st.slider(
+            "⏱️ 對話時間限制（分鐘，0 表示無限制）",
+            min_value=0,
+            max_value=20,
+            value=st.session_state.timer_limit_minutes if st.session_state.timer_limit_minutes <= 20 else 7,
+            key="voice_time_limit_slider"
+        )
+        st.session_state.timer_limit_minutes = voice_time_limit
+    with col_time2:
+        if voice_time_limit > 0:
+            st.metric("限時", f"{voice_time_limit} 分鐘")
+        else:
+            st.metric("限時", "無限制")
+    
+    st.info("點擊「開始對話」後允許使用麥克風，直接說話即可。結束後點擊「結束對話」，再按下方按鈕產生評分。")
+    
+    # 渲染語音組件
+    voice_system_prompt = get_voice_system_prompt(selected_case, st.session_state.emotion_mode)
+    time_limit_secs = voice_time_limit * 60 if voice_time_limit else 0
+    voice_html = create_realtime_voice_html(
+        api_key=st.session_state.openai_api_key,
+        system_prompt=voice_system_prompt,
+        voice=st.session_state.voice_selected,
+        role_label=ROLE_LABEL,
+        time_limit_seconds=time_limit_secs,
+    )
+    components.html(voice_html, height=550, scrolling=True)
+    
+    st.markdown("---")
+    
+    # 對話記錄輸入區
+    st.markdown("### 📋 貼上對話記錄")
+    st.caption("對話結束後，點擊上方「📋 複製對話記錄」按鈕，然後貼到下方輸入框")
+    
+    # 使用兩欄佈局：左邊輸入框，右邊讀取按鈕
+    col_input, col_btn = st.columns([4, 1])
+    
+    with col_input:
+        voice_data_input = st.text_input(
+            "對話記錄 (JSON)",
+            value="",
+            key="voice_data_input",
+            label_visibility="collapsed",
+            placeholder="貼上對話記錄 JSON..."
+        )
+    
+    with col_btn:
+        read_btn = st.button("📥 讀取", type="primary", use_container_width=True)
+    
+    # 點擊讀取按鈕或自動偵測
+    if (read_btn or voice_data_input) and not st.session_state.voice_conversation_ended:
+        if voice_data_input:
+            try:
+                conv_data = json.loads(voice_data_input)
+                voice_messages = conv_data.get("messages", [])
+                voice_duration = conv_data.get("duration", 0)
+                if voice_messages:
+                    st.session_state.voice_messages = voice_messages
+                    st.session_state.voice_duration = voice_duration
+                    st.session_state.voice_conversation_ended = True
+                    st.rerun()
+                elif read_btn:
+                    st.warning("⚠️ 對話記錄中沒有訊息")
+            except json.JSONDecodeError:
+                if read_btn:
+                    st.error("❌ JSON 格式錯誤，請確認複製的內容完整")
+    
+    # 如果對話已結束且有訊息，顯示評分選項
+    if st.session_state.voice_conversation_ended and st.session_state.voice_messages:
+        st.success(f"✅ 語音對話已結束，共 {len(st.session_state.voice_messages)} 則訊息，時長 {st.session_state.voice_duration // 60} 分 {st.session_state.voice_duration % 60} 秒")
+        
+        # 顯示對話逐字稿
+        with st.expander("📜 查看對話逐字稿", expanded=True):
+            for msg in st.session_state.voice_messages:
+                role = "醫學生" if msg.get("role") == "user" else ROLE_LABEL
+                st.markdown(f"**{role}**: {msg.get('content', '')}")
+        
+        if not st.session_state.last_evaluation:
+            if st.button("📊 產生評分與回饋", type="primary", use_container_width=True, key="voice_eval_btn"):
+                # 將語音對話訊息複製到 messages 以便使用現有評分邏輯
+                st.session_state.messages = [
+                    {"role": m.get("role"), "content": m.get("content", "")}
+                    for m in st.session_state.voice_messages
+                ]
+                st.session_state.pending_evaluation = True
+                if st.session_state.conversation_started_at is None:
+                    st.session_state.conversation_started_at = time.time() - st.session_state.voice_duration
+                st.rerun()
+        
+        # 重新開始語音對話按鈕
+        if st.button("🔄 重新開始語音對話", type="secondary", key="voice_restart_btn"):
+            reset_voice_mode()
+            st.rerun()
+
+else:
+    # 文字模式介面（原有邏輯）
+    # 顯示對話歷史
+    for msg in st.session_state.messages:
+        avatar = "🧑‍⚕️" if msg["role"] == "user" else AVATAR_PATIENT
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
 
 # 觸發評分計算
 if st.session_state.pending_evaluation:
@@ -1403,54 +2055,60 @@ elif st.session_state.last_evaluation:
     elif score_rows and not st.session_state.admin_mode:
         st.caption("詳細項目僅限管理員查看。")
 
-# 對話輸入
-prompt = st.chat_input("請輸入您的問診內容...")
-if prompt:
-    is_first_message = st.session_state.conversation_started_at is None
-    if is_first_message:
-        st.session_state.conversation_started_at = time.time()
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.session_state.last_evaluation = None
-    st.session_state.last_evaluation_error = None
-    # 清除舊的回饋（因為對話內容變了）
-    st.session_state.spikes_feedback = None
-    st.session_state.shair_feedback = None
-    
-    if detect_diagnosis_disclosure(prompt):
-        st.session_state.diagnosis_disclosed = True
-    update_stage(prompt)
-    
-    with st.chat_message("user", avatar="🧑‍⚕️"):
-        st.markdown(prompt)
-    
-    with st.chat_message("assistant", avatar=AVATAR_PATIENT):
-        with st.spinner(f"{ROLE_LABEL}思考回覆中..."):
-            try:
-                system_prompt = compose_system_prompt(prompt)
-                temperature = EMOTION_MODES[st.session_state.emotion_mode].get("temperature", 0.7)
-                messages = [{"role": "system", "content": system_prompt}] + st.session_state.messages
-                
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=420,
-                )
-                
-                content = response.choices[0].message.content.strip()
-                annotated = annotate_with_intensity(content, st.session_state.emotion_mode)
-                st.markdown(annotated)
-                st.session_state.messages.append({"role": "assistant", "content": annotated})
-                
-            except AuthenticationError:
-                st.error("❌ OpenAI API 金鑰無效或已過期。")
-            except Exception as exc:
-                st.error(f"⚠️ 呼叫 OpenAI API 時發生錯誤：{exc}")
-    
-    # 第一則訊息時 rerun，讓側邊欄計時器開始顯示
-    if is_first_message:
-        st.rerun()
+# =========================================================
+# 對話輸入（僅文字模式）
+# =========================================================
+if not st.session_state.voice_mode:
+    prompt = st.chat_input("請輸入您的問診內容...")
+
+    # 處理輸入
+    if prompt:
+        is_first_message = st.session_state.conversation_started_at is None
+        if is_first_message:
+            st.session_state.conversation_started_at = time.time()
+        
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.last_evaluation = None
+        st.session_state.last_evaluation_error = None
+        # 清除舊的回饋（因為對話內容變了）
+        st.session_state.steps_feedback = None
+        st.session_state.spikes_feedback = None
+        st.session_state.shair_feedback = None
+        
+        if detect_diagnosis_disclosure(prompt):
+            st.session_state.diagnosis_disclosed = True
+        update_stage(prompt)
+        
+        with st.chat_message("user", avatar="🧑‍⚕️"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant", avatar=AVATAR_PATIENT):
+            with st.spinner(f"{ROLE_LABEL}思考回覆中..."):
+                try:
+                    system_prompt = compose_system_prompt(prompt)
+                    temperature = EMOTION_MODES[st.session_state.emotion_mode].get("temperature", 0.7)
+                    messages = [{"role": "system", "content": system_prompt}] + st.session_state.messages
+                    
+                    response = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=420,
+                    )
+                    
+                    content = response.choices[0].message.content.strip()
+                    annotated = annotate_with_intensity(content, st.session_state.emotion_mode)
+                    st.markdown(annotated)
+                    st.session_state.messages.append({"role": "assistant", "content": annotated})
+                    
+                except AuthenticationError:
+                    st.error("❌ OpenAI API 金鑰無效或已過期。")
+                except Exception as exc:
+                    st.error(f"⚠️ 呼叫 OpenAI API 時發生錯誤：{exc}")
+        
+        # 第一則訊息時 rerun，讓側邊欄計時器開始顯示
+        if is_first_message:
+            st.rerun()
 
 st.divider()
 st.caption(f"📚 教案：{case_info['name']}")
