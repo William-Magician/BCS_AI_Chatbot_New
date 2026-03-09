@@ -72,6 +72,13 @@ CASE_OPTIONS = {
 }
 
 # =========================================================
+# 暫時停用的教案（把 case_id 加進這個 set 就會隱藏該教案按鈕）
+# 要重新啟用時只要把該 id 從 set 中移除即可
+# 重新開放腹痛教案 → 把 "abdominal_pain" 從 set 裡移除，改成 DISABLED_CASES = set() , 改成只留腹痛 → 改成 DISABLED_CASES = {"npc"}
+# =========================================================
+DISABLED_CASES = {"abdominal_pain"}   # ← 目前關閉腹痛教案；全開請改成 set()
+
+# =========================================================
 # Session State 初始化
 # =========================================================
 if "selected_case" not in st.session_state:
@@ -91,7 +98,9 @@ if "user_serial" not in st.session_state:
 
 # 語音模式相關的 session state
 if "voice_mode" not in st.session_state:
-    st.session_state.voice_mode = False  # False=文字模式, True=語音模式
+    st.session_state.voice_mode = False  # False=文字模式, True=即時語音模式
+if "voice_input_mode" not in st.session_state:
+    st.session_state.voice_input_mode = False  # 語音輸入模式（先轉文字再送出）
 if "voice_messages" not in st.session_state:
     st.session_state.voice_messages = []
 if "voice_duration" not in st.session_state:
@@ -100,6 +109,10 @@ if "voice_conversation_ended" not in st.session_state:
     st.session_state.voice_conversation_ended = False
 if "voice_selected" not in st.session_state:
     st.session_state.voice_selected = "shimmer"
+if "voice_input_text" not in st.session_state:
+    st.session_state.voice_input_text = ""  # 語音輸入模式的暫存文字
+if "pending_tts_audio" not in st.session_state:
+    st.session_state.pending_tts_audio = None  # 待播放的 TTS 音頻
 
 
 def reset_to_case_selection():
@@ -114,8 +127,9 @@ def reset_to_case_selection():
         "timeout_triggered", "logged_this_session", "admin_mode",
         "context_engine", "case_config",
         # 語音模式相關
-        "voice_mode", "voice_messages", "voice_duration",
-        "voice_conversation_ended", "voice_selected",
+        "voice_mode", "voice_input_mode", "voice_messages", "voice_duration",
+        "voice_conversation_ended", "voice_selected", "voice_input_text",
+        "pending_tts_audio",
     ]
     for key in keys_to_clear:
         if key in st.session_state:
@@ -185,11 +199,12 @@ if not st.session_state.case_confirmed:
     st.markdown("每個教案有獨立的對話情境和評分標準。選擇後將進入對應的模擬對話。")
     st.markdown("")
     
-    # 教案選擇卡片
-    cols = st.columns(2)
+    # 教案選擇卡片（排除停用教案）
+    active_cases = [(cid, ci) for cid, ci in CASE_OPTIONS.items() if cid not in DISABLED_CASES]
+    cols = st.columns(min(2, len(active_cases)))
     
-    for idx, (case_id, case_info) in enumerate(CASE_OPTIONS.items()):
-        with cols[idx]:
+    for idx, (case_id, case_info) in enumerate(active_cases):
+        with cols[idx % len(cols)]:
             with st.container(border=True):
                 st.markdown(f"### {case_info['icon']} {case_info['name']}")
                 st.markdown(f"**角色：** {case_info['role']}")
@@ -565,11 +580,254 @@ def detect_diagnosis_disclosure(user_text: str) -> bool:
     return False
 
 
+def get_emotion_visual_config() -> Dict[str, Dict]:
+    """
+    情緒視覺化配置系統
+    包含：表情符號變化、顏色深淺、強度說明
+    """
+    return {
+        # ========== 鼻咽癌教案情緒（完整對應 case_npc.py EMOTION_MODES）==========
+        "極度震驚否認型": {
+            "base_color": "#B22222",  # 深紅色系 - 震驚
+            "emoji_levels": ["😦", "😨", "😱", "😱", "🤯"],
+            "intensity_desc": {
+                1: "平靜/觀望，日常寒暄",
+                2: "感受壞消息暗示，開始追問",
+                3: "確認壞消息，開始質疑",
+                4: "語無倫次，拒絕接受",
+                5: "完全崩潰，大聲否認",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "恐懼擔憂型": {
+            "base_color": "#FF8C00",  # 橙色系 - 恐懼
+            "emoji_levels": ["😟", "😟", "😰", "😰", "😱"],
+            "intensity_desc": {
+                1: "輕微緊張，等待報告",
+                2: "感受暗示，開始追問",
+                3: "確認壞消息，焦慮明顯",
+                4: "反覆詢問存活率、擔心家人",
+                5: "恐慌發作，難以冷靜",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "冷靜理性型": {
+            "base_color": "#4169E1",  # 藍色系 - 冷靜
+            "emoji_levels": ["😐", "🤔", "🤔", "😐", "😐"],
+            "intensity_desc": {
+                1: "日常問答，配合對話",
+                2: "開始詢問治療細節",
+                3: "理性分析選項、費用",
+                4: "壓抑情緒，條理清晰",
+                5: "過度理性，壓抑感受",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "悲傷沮喪型": {
+            "base_color": "#6A5ACD",  # 紫色系 - 悲傷
+            "emoji_levels": ["😔", "😔", "😢", "😢", "😭"],
+            "intensity_desc": {
+                1: "輕微失落，語氣低落",
+                2: "明顯難過，沉默寡言",
+                3: "確認壞消息，悲傷明顯",
+                4: "聲音哽咽，無力自責",
+                5: "崩潰哭泣，覺得絕望",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "憤怒質疑型": {
+            "base_color": "#DC143C",  # 紅色系 - 憤怒
+            "emoji_levels": ["😐", "😒", "😤", "😠", "😡"],
+            "intensity_desc": {
+                1: "輕微不滿，開始質疑",
+                2: "明顯不耐，懷疑檢查",
+                3: "態度強硬，要求解釋",
+                4: "語氣尖銳，指責醫療",
+                5: "激烈抗議，大聲質問",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "接受配合型": {
+            "base_color": "#32CD32",  # 綠色系 - 接受
+            "emoji_levels": ["😐", "🙂", "😊", "💪", "💪"],
+            "intensity_desc": {
+                1: "被動接受，聽從安排",
+                2: "開始配合，願意聽取",
+                3: "主動詢問，積極面對",
+                4: "態度正向，準備治療",
+                5: "完全接受，全力配合",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        # ========== 腹痛教案情緒（完整對應 case_abdominal_pain.py）==========
+        "焦慮擔心": {
+            "base_color": "#FF8C00",
+            "emoji_levels": ["😟", "😟", "😰", "😰", "😱"],
+            "intensity_desc": {
+                1: "平靜配合，日常問答",
+                2: "開始擔心，追問細節",
+                3: "情緒波動，難以專注",
+                4: "語調急促，反覆確認",
+                5: "極度恐慌，需要冷靜",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "自責崩潰": {
+            "base_color": "#8B0000",  # 深紅色系
+            "emoji_levels": ["😔", "😢", "😢", "😭", "😭"],
+            "intensity_desc": {
+                1: "輕微自責，語氣低落",
+                2: "明顯自責，反覆道歉",
+                3: "深度自責，聲音哽咽",
+                4: "情緒激動，崩潰哭泣",
+                5: "完全崩潰，無法自拔",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "憤怒質疑": {
+            "base_color": "#DC143C",
+            "emoji_levels": ["😒", "😤", "😤", "😠", "😡"],
+            "intensity_desc": {
+                1: "輕微不滿，偶爾質疑",
+                2: "明顯不耐，態度懷疑",
+                3: "強烈質疑，要求解釋",
+                4: "語氣尖銳，可能打斷",
+                5: "激烈抗議，拒絕接受",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "堅持轉院": {
+            "base_color": "#FF6347",  # 番茄紅
+            "emoji_levels": ["🤔", "😤", "😤", "😠", "😠"],
+            "intensity_desc": {
+                1: "日常問答，尚未提轉院",
+                2: "開始考慮，提出疑慮",
+                3: "明確傾向，表達想法",
+                4: "強烈堅持，難以說服",
+                5: "完全拒絕留院，威脅離開",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+        "冷靜配合": {
+            "base_color": "#4169E1",
+            "emoji_levels": ["😐", "🙂", "🙂", "😊", "😊"],
+            "intensity_desc": {
+                1: "日常問答，配合對話",
+                2: "理解說明，基本配合",
+                3: "主動詢問，願意了解",
+                4: "積極配合，信任醫師",
+                5: "完全信任，全力配合",
+            },
+            "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+        },
+    }
+
+
+def create_emotion_card_html(emotion_mode: str, intensity: int) -> str:
+    """
+    建立情緒視覺化 HTML 卡片
+    - 背景色深淺代表強度
+    - 表情符號隨強度變化
+    - 顯示當前強度的行為說明
+    """
+    config = get_emotion_visual_config()
+    emotion_config = config.get(emotion_mode, {
+        "base_color": "#888888",
+        "emoji_levels": ["😐", "😐", "😐", "😐", "😐"],
+        "intensity_desc": {i: "情緒穩定" for i in range(1, 6)},
+        "color_opacity": [0.2, 0.4, 0.6, 0.8, 1.0],
+    })
+    
+    # 確保 intensity 在 1-5 範圍
+    intensity = max(1, min(5, int(intensity)))
+    
+    # 取得對應強度的配置
+    emoji = emotion_config["emoji_levels"][intensity - 1]
+    desc = emotion_config["intensity_desc"].get(intensity, "")
+    opacity = emotion_config["color_opacity"][intensity - 1]
+    base_color = emotion_config["base_color"]
+    
+    # 將 hex 顏色轉換為 rgba
+    r = int(base_color[1:3], 16)
+    g = int(base_color[3:5], 16)
+    b = int(base_color[5:7], 16)
+    bg_color = f"rgba({r}, {g}, {b}, {opacity})"
+    
+    # 根據背景深淺決定文字顏色
+    text_color = "#FFFFFF" if opacity >= 0.6 else "#333333"
+    
+    # 建立強度條（填滿的方塊）
+    filled_blocks = "█" * intensity
+    empty_blocks = "░" * (5 - intensity)
+    intensity_bar = filled_blocks + empty_blocks
+    
+    html = f"""
+<div style="
+    background: {bg_color};
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 10px 0;
+    border-left: 4px solid {base_color};
+">
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 28px;">{emoji}</span>
+        <div>
+            <div style="color: {text_color}; font-weight: bold; font-size: 14px;">
+                情緒狀態：{emotion_mode}
+            </div>
+            <div style="color: {text_color}; font-size: 13px; margin-top: 2px;">
+                強度：<span style="font-family: monospace; letter-spacing: 2px;">{intensity_bar}</span> ({intensity}/5)
+            </div>
+        </div>
+    </div>
+    <div style="
+        color: {text_color};
+        font-size: 12px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255,255,255,0.3);
+        font-style: italic;
+    ">
+        💭 {desc}
+    </div>
+</div>
+"""
+    return html
+
+
 def annotate_with_intensity(content: str, emotion_mode: str) -> str:
-    if "情緒強度" in content:
+    """
+    為回覆加上情緒視覺化標註
+    - 解析 AI 回覆中的 {EMOTION:X} 動態強度標記
+    - 移除標記並用視覺化卡片顯示
+    """
+    import re
+    
+    # 如果已經有視覺化卡片（HTML），直接返回
+    if "情緒狀態：" in content and "<div" in content:
         return content
-    intensity = EMOTION_MODES.get(emotion_mode, {}).get("intensity", 3)
-    return f"{content}\n\n【情緒強度：{emotion_mode} {int(intensity)}/5】"
+    
+    # 解析動態情緒強度標記 {EMOTION:X}
+    dynamic_intensity = None
+    emotion_match = re.search(r'\{EMOTION:(\d)\}', content)
+    if emotion_match:
+        dynamic_intensity = int(emotion_match.group(1))
+        # 移除標記
+        content = re.sub(r'\s*\{EMOTION:\d\}', '', content)
+    
+    # 移除 AI 可能自己加的舊格式情緒標籤
+    clean_content = re.sub(r'\n*【情緒強度：[^】]+】', '', content)
+    clean_content = clean_content.strip()
+    
+    # 決定最終強度：優先使用動態強度，否則使用教案預設
+    if dynamic_intensity is not None:
+        intensity = dynamic_intensity
+    else:
+        intensity = EMOTION_MODES.get(emotion_mode, {}).get("intensity", 3)
+    
+    emotion_html = create_emotion_card_html(emotion_mode, intensity)
+    
+    return f"{clean_content}\n\n{emotion_html}"
 
 
 def compose_system_prompt(latest_user_text: str) -> str:
@@ -1007,10 +1265,60 @@ with st.sidebar:
     
     st.divider()
     
-    # 對話模式切換
+    # 考生指引與報告摘要（移到對話模式上方）
+    if selected_case == "npc":
+        with st.expander("📘 考生指引摘錄", expanded=False):
+            st.markdown(
+                "背景：46 歲男性吳忠明，在內視鏡鼻咽部切片檢查後回診確認報告。  \n"
+                "任務：向病人說明病情與後續流程，並確保能回應相關提問。  \n"
+                "測驗重點：病情說明、情緒處置以及臨床下一步溝通，時間總長 7 分鐘。"
+            )
+        with st.expander("🧾 病理報告摘要", expanded=False):
+            st.markdown(
+                "病理診斷：鼻咽部角化鱗狀細胞癌 (keratinizing squamous cell carcinoma)。  \n"
+                "備註：報告放置於診間桌面，醫師口頭揭露前病人不會自行確認為癌症。"
+            )
+    elif selected_case == "abdominal_pain":
+        with st.expander("📘 情境說明", expanded=False):
+            st.markdown(
+                "**場景**：急診室  \n"
+                "**病人**：陳志華先生，75 歲，糖尿病導致末期腎臟病，腹膜透析約兩年。  \n"
+                "**現況**：因腹痛 8 小時、發燒、血壓低，已在急救室輸液/氧氣。  \n"
+                "**您的角色**：長女（主要照顧者），需與醫學生討論病情與治療選項。"
+            )
+        with st.expander("🧾 抽血檢驗報告", expanded=False):
+            for category, items in LAB_DATA.items():
+                st.markdown(f"**{category}**")
+                for test_name, value in items.items():
+                    st.markdown(f"- {test_name}：{value}")
+        with st.expander("🖼️ CT 影像", expanded=False):
+            for img_name in CT_IMAGES:
+                img_path = PROJECT_ROOT / img_name
+                if img_path.exists():
+                    st.image(str(img_path), use_container_width=True)
+                else:
+                    st.warning(f"找不到圖片：{img_name}")
+        with st.expander("🧾 衛教重點", expanded=False):
+            st.markdown(
+                "1. 腹膜透析的無菌操作（洗手、環境清潔）  \n"
+                "2. 手術與麻醉風險說明  \n"
+                "3. 不手術的後果與替代方案  \n"
+                "4. 轉院考量與建議"
+            )
+    
+    st.divider()
+    
+    # 對話模式切換（三種模式）
     st.markdown("### 🎛️ 對話模式")
-    mode_options = ["💬 文字模式", "🎤 即時語音模式"]
-    current_mode_idx = 1 if st.session_state.voice_mode else 0
+    mode_options = ["💬 文字模式", "🎙️ 語音輸入", "🎤 即時語音"]
+    # 判斷當前模式
+    if st.session_state.voice_mode:
+        current_mode_idx = 2  # 即時語音模式
+    elif st.session_state.voice_input_mode:
+        current_mode_idx = 1  # 語音輸入模式
+    else:
+        current_mode_idx = 0  # 文字模式
+    
     selected_mode = st.radio(
         "選擇對話模式",
         mode_options,
@@ -1018,10 +1326,15 @@ with st.sidebar:
         horizontal=True,
         label_visibility="collapsed",
     )
-    new_voice_mode = (selected_mode == "🎤 即時語音模式")
-    if new_voice_mode != st.session_state.voice_mode:
+    
+    # 處理模式切換
+    new_voice_mode = (selected_mode == "🎤 即時語音")
+    new_voice_input_mode = (selected_mode == "🎙️ 語音輸入")
+    
+    if new_voice_mode != st.session_state.voice_mode or new_voice_input_mode != st.session_state.voice_input_mode:
         st.session_state.voice_mode = new_voice_mode
-        # 切換模式時重置計時器（語音模式有自己的計時器）
+        st.session_state.voice_input_mode = new_voice_input_mode
+        # 切換模式時重置計時器（即時語音模式有自己的計時器）
         st.session_state.conversation_started_at = None
         st.session_state.timer_frozen_at = None
         # 清除評分結果
@@ -1030,10 +1343,12 @@ with st.sidebar:
         st.session_state.steps_feedback = None
         st.session_state.spikes_feedback = None
         st.session_state.shair_feedback = None
+        st.session_state.voice_input_text = ""  # 清除語音輸入暫存
         st.rerun()
     
+    # 模式說明
     if st.session_state.voice_mode:
-        st.info("🎤 語音模式：使用 OpenAI Realtime API 進行即時語音對話")
+        st.info("🎤 即時語音：使用 OpenAI Realtime API 進行即時語音對話")
         # 語音選擇
         voice_options = {
             "shimmer": "Shimmer（女聲，溫和）",
@@ -1048,10 +1363,9 @@ with st.sidebar:
             format_func=lambda x: voice_options[x],
             index=list(voice_options.keys()).index(st.session_state.voice_selected),
         )
-    # st.markdown("---")
-    #     st.rerun()
+    elif st.session_state.voice_input_mode:
+        st.info("🎙️ 語音輸入：說完後可修改文字，按 Enter 送出")
 
-    # st.markdown("---")
     st.header("⚙️ 功能選單")
     
     # 情緒模式選擇
@@ -1136,47 +1450,6 @@ with st.sidebar:
             if st.session_state.conversation_started_at and not st.session_state.timer_frozen_at:
                 st.session_state.timer_frozen_at = time.time()
             st.rerun()
-    
-    # 考生指引與報告摘要（僅鼻咽癌教案）
-    if selected_case == "npc":
-        with st.expander("📘 考生指引摘錄", expanded=False):
-            st.markdown(
-                "背景：46 歲男性吳忠明，在內視鏡鼻咽部切片檢查後回診確認報告。  \n"
-                "任務：向病人說明病情與後續流程，並確保能回應相關提問。  \n"
-                "測驗重點：病情說明、情緒處置以及臨床下一步溝通，時間總長 7 分鐘。"
-            )
-        with st.expander("🧾 病理報告摘要", expanded=False):
-            st.markdown(
-                "病理診斷：鼻咽部角化鱗狀細胞癌 (keratinizing squamous cell carcinoma)。  \n"
-                "備註：報告放置於診間桌面，醫師口頭揭露前病人不會自行確認為癌症。"
-            )
-    elif selected_case == "abdominal_pain":
-        with st.expander("📘 情境說明", expanded=False):
-            st.markdown(
-                "**場景**：急診室  \n"
-                "**病人**：陳志華先生，75 歲，糖尿病導致末期腎臟病，腹膜透析約兩年。  \n"
-                "**現況**：因腹痛 8 小時、發燒、血壓低，已在急救室輸液/氧氣。  \n"
-                "**您的角色**：長女（主要照顧者），需與醫學生討論病情與治療選項。"
-            )
-        with st.expander("🧾 抽血檢驗報告", expanded=False):
-            for category, items in LAB_DATA.items():
-                st.markdown(f"**{category}**")
-                for test_name, value in items.items():
-                    st.markdown(f"- {test_name}：{value}")
-        with st.expander("🖼️ CT 影像", expanded=False):
-            for img_name in CT_IMAGES:
-                img_path = PROJECT_ROOT / img_name
-                if img_path.exists():
-                    st.image(str(img_path), use_container_width=True)
-                else:
-                    st.warning(f"找不到圖片：{img_name}")
-        with st.expander("🧾 衛教重點", expanded=False):
-            st.markdown(
-                "1. 腹膜透析的無菌操作（洗手、環境清潔）  \n"
-                "2. 手術與麻醉風險說明  \n"
-                "3. 不手術的後果與替代方案  \n"
-                "4. 轉院考量與建議"
-            )
     
     st.divider()
     
@@ -1298,10 +1571,17 @@ def get_voice_system_prompt(case_id: str, emotion_mode: str) -> str:
 ### 情緒模式
 {emotion_mode}
 
-### 關於轉院的想法（非常重要）
-- 你內心一直在猶豫這家醫院能不能處理好爸爸的狀況。
-- 如果醫學生提到病情嚴重、需要手術、或風險較高，你應該主動提出：「那要不要轉到大醫院？」「這裡開刀可以嗎？會不會轉去醫學中心比較好？」
-- 即使醫學生沒有先提轉院，當對話進展到討論治療選項或手術時，你也應該在合適時機主動問。
+### 關於轉院的想法（非常重要，請嚴格遵守時機）
+- 【時機控制】你一開始不會主動提轉院。只有當醫學生明確說到「手術」「開刀」這類字眼後，你才會在下一個回覆中提出轉院的想法。
+- 當你聽到醫學生提到「手術」「開刀」「要開」等字眼後，你的下一句話要表達：「那要不要轉到大醫院？」或「這裡開刀可以嗎？會不會轉去醫學中心比較好？」
+- 在聽到「手術」「開刀」之前，你不要主動提轉院。
+
+### 關於腹膜透析的問題（非常重要）
+- 當醫學生問你「還有沒有其他問題？」「還有什麼想問的嗎？」或類似問題時，你要問：「如果我爸爸以後病好了，我想幫爸爸做腹膜透析。請問做腹膜透析時要注意哪些？」
+
+### 結束對話的方式（非常重要）
+- 當對話接近尾聲，或醫學生表示說明完畢、詢問是否還有問題且你已問過腹膜透析問題後，你要說：「好，等我弟弟來了之後，我們再討論看看。」
+- 這句話代表對話的結束。
 
 ### 回覆規則
 - 【最重要】你是家屬，等待醫學生先開口。絕對不要主動先說話，必須等醫學生開始對話。
@@ -1571,6 +1851,12 @@ def create_realtime_voice_html(api_key: str, system_prompt: str, voice: str, rol
                                 input_audio_transcription: {{ 
                                     model: 'whisper-1',
                                     language: 'zh'
+                                }},
+                                turn_detection: {{
+                                    type: 'server_vad',
+                                    threshold: 0.5,
+                                    prefix_padding_ms: 500,
+                                    silence_duration_ms: 2000
                                 }}
                             }}
                         }}));
@@ -1834,7 +2120,7 @@ else:
     for msg in st.session_state.messages:
         avatar = "🧑‍⚕️" if msg["role"] == "user" else AVATAR_PATIENT
         with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"])
+            st.markdown(msg["content"], unsafe_allow_html=True)
 
 # 觸發評分計算
 if st.session_state.pending_evaluation:
@@ -2056,10 +2342,365 @@ elif st.session_state.last_evaluation:
         st.caption("詳細項目僅限管理員查看。")
 
 # =========================================================
-# 對話輸入（僅文字模式）
+# 對話輸入（文字模式 + 語音輸入模式）
 # =========================================================
 if not st.session_state.voice_mode:
-    prompt = st.chat_input("請輸入您的問診內容...")
+    # 語音輸入模式：使用 Web Speech API 進行語音轉文字
+    if st.session_state.voice_input_mode:
+        # 語音輸入介面 - 點擊開始/停止 + AI 語音回覆
+        st.markdown("---")
+        
+        # 說明
+        st.markdown("### 🎙️ 語音輸入模式")
+        st.caption("點擊「開始錄音」說話，再點一次停止。可修改文字後點擊「送出」，AI 會語音回覆。")
+        
+        # 初始化 voice_input_submitted
+        if "voice_input_submitted" not in st.session_state:
+            st.session_state.voice_input_submitted = None
+        
+        # Web Speech API 語音辨識元件（使用 Streamlit 元件回傳值）
+        voice_input_html = """
+        <style>
+            .voice-input-container {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                padding: 20px;
+                background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+                border-radius: 16px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            }
+            .voice-btn {
+                padding: 14px 28px;
+                font-size: 16px;
+                font-weight: 600;
+                border: none;
+                border-radius: 30px;
+                cursor: pointer;
+                transition: all 0.2s ease;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                user-select: none;
+            }
+            .voice-btn.record {
+                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                color: white;
+                box-shadow: 0 4px 15px rgba(79, 172, 254, 0.4);
+                min-width: 160px;
+            }
+            .voice-btn.record:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(79, 172, 254, 0.5);
+            }
+            .voice-btn.record.recording {
+                background: linear-gradient(135deg, #f5576c 0%, #f093fb 100%);
+                box-shadow: 0 4px 15px rgba(245, 87, 108, 0.5);
+                animation: pulse-btn 1.5s infinite;
+            }
+            @keyframes pulse-btn {
+                0%, 100% { transform: scale(1); }
+                50% { transform: scale(1.03); }
+            }
+            .voice-btn.submit {
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+                box-shadow: 0 4px 15px rgba(17, 153, 142, 0.4);
+            }
+            .voice-btn.submit:hover {
+                transform: translateY(-2px);
+            }
+            .voice-btn.submit:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+                transform: none;
+                box-shadow: none;
+            }
+            .voice-btn.clear {
+                background: #6c757d;
+                color: white;
+                padding: 10px 20px;
+                font-size: 14px;
+            }
+            .status-bar {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                padding: 10px;
+                border-radius: 8px;
+                font-size: 14px;
+                transition: all 0.3s ease;
+            }
+            .status-bar.idle {
+                background: #e9ecef;
+                color: #6c757d;
+            }
+            .status-bar.recording {
+                background: linear-gradient(135deg, #f5576c 0%, #f093fb 100%);
+                color: white;
+            }
+            .status-bar.done {
+                background: #d4edda;
+                color: #155724;
+            }
+            .status-bar.sending {
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+            }
+            .pulse-dot {
+                width: 10px;
+                height: 10px;
+                background: white;
+                border-radius: 50%;
+                animation: pulse 1s infinite;
+            }
+            @keyframes pulse {
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.3); opacity: 0.7; }
+            }
+            .text-editor {
+                width: 100%;
+                padding: 12px 16px;
+                font-size: 16px;
+                border: 2px solid #dee2e6;
+                border-radius: 12px;
+                outline: none;
+                transition: border-color 0.2s ease;
+                min-height: 60px;
+                resize: vertical;
+                font-family: inherit;
+                box-sizing: border-box;
+            }
+            .text-editor:focus {
+                border-color: #4facfe;
+                box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.2);
+            }
+            .text-editor.has-content {
+                border-color: #11998e;
+            }
+            .btn-row {
+                display: flex;
+                gap: 10px;
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+            .not-supported {
+                padding: 15px;
+                background: #fff3cd;
+                border: 1px solid #ffc107;
+                border-radius: 8px;
+                color: #856404;
+                text-align: center;
+            }
+        </style>
+        
+        <div class="voice-input-container" id="voiceContainer">
+            <div id="supportedUI">
+                <div class="btn-row">
+                    <button id="recordBtn" class="voice-btn record" onclick="toggleRecording()">
+                        🎙️ 開始錄音
+                    </button>
+                </div>
+                
+                <div id="statusBar" class="status-bar idle">
+                    <span id="statusText">點擊按鈕開始錄音</span>
+                </div>
+                
+                <textarea id="textEditor" class="text-editor" 
+                          placeholder="語音辨識結果會顯示在這裡，您可以修改後點擊「填入下方」..."
+                          rows="2"></textarea>
+                
+                <div class="btn-row">
+                    <button id="clearBtn" class="voice-btn clear" onclick="clearText()">
+                        🗑️ 清除
+                    </button>
+                    <button id="submitBtn" class="voice-btn submit" onclick="submitText()" disabled>
+                        📋 複製文字
+                    </button>
+                </div>
+            </div>
+            
+            <div id="notSupportedUI" class="not-supported" style="display: none;">
+                ⚠️ 您的瀏覽器不支援語音辨識功能。請使用 Chrome 或 Edge 瀏覽器。
+            </div>
+        </div>
+        
+        <script>
+            let recognition = null;
+            let finalTranscript = '';
+            let isRecording = false;
+            
+            const recordBtn = document.getElementById('recordBtn');
+            const statusBar = document.getElementById('statusBar');
+            const statusText = document.getElementById('statusText');
+            const textEditor = document.getElementById('textEditor');
+            const submitBtn = document.getElementById('submitBtn');
+            const supportedUI = document.getElementById('supportedUI');
+            const notSupportedUI = document.getElementById('notSupportedUI');
+            
+            // 檢查瀏覽器支援
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition = new SpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = true;
+                recognition.lang = 'zh-TW';
+                
+                recognition.onstart = function() {
+                    isRecording = true;
+                    recordBtn.classList.add('recording');
+                    recordBtn.innerHTML = '⏹️ 停止錄音';
+                    statusBar.className = 'status-bar recording';
+                    statusText.innerHTML = '<div class="pulse-dot"></div> 正在聆聽... 再點一次停止';
+                };
+                
+                recognition.onresult = function(event) {
+                    let interim = '';
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        if (event.results[i].isFinal) {
+                            finalTranscript += event.results[i][0].transcript;
+                        } else {
+                            interim += event.results[i][0].transcript;
+                        }
+                    }
+                    textEditor.value = finalTranscript + interim;
+                    updateEditorState();
+                };
+                
+                recognition.onerror = function(event) {
+                    console.error('Speech recognition error:', event.error);
+                    if (event.error !== 'aborted' && event.error !== 'no-speech') {
+                        statusText.textContent = '辨識錯誤: ' + event.error;
+                    }
+                };
+                
+                recognition.onend = function() {
+                    isRecording = false;
+                    recordBtn.classList.remove('recording');
+                    recordBtn.innerHTML = '🎙️ 開始錄音';
+                    
+                    if (textEditor.value.trim()) {
+                        statusBar.className = 'status-bar done';
+                        statusText.textContent = '✓ 辨識完成！可修改文字後點擊送出';
+                    } else {
+                        statusBar.className = 'status-bar idle';
+                        statusText.textContent = '點擊按鈕開始錄音';
+                    }
+                };
+            } else {
+                supportedUI.style.display = 'none';
+                notSupportedUI.style.display = 'block';
+            }
+            
+            function toggleRecording() {
+                if (!recognition) return;
+                
+                if (isRecording) {
+                    recognition.stop();
+                } else {
+                    finalTranscript = textEditor.value;
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        console.log('Recognition error:', e);
+                    }
+                }
+            }
+            
+            function clearText() {
+                textEditor.value = '';
+                finalTranscript = '';
+                updateEditorState();
+                statusBar.className = 'status-bar idle';
+                statusText.textContent = '已清除，點擊按鈕開始錄音';
+            }
+            
+            function updateEditorState() {
+                const hasContent = textEditor.value.trim().length > 0;
+                submitBtn.disabled = !hasContent;
+                textEditor.classList.toggle('has-content', hasContent);
+            }
+            
+            function submitText() {
+                const text = textEditor.value.trim();
+                if (text) {
+                    // 更新狀態
+                    statusBar.className = 'status-bar sending';
+                    statusText.textContent = '⏳ 正在複製文字...';
+                    submitBtn.disabled = true;
+                    
+                    // 複製到剪貼簿
+                    navigator.clipboard.writeText(text).then(function() {
+                        statusBar.className = 'status-bar done';
+                        statusText.innerHTML = '✓ <b>已複製！</b>請點擊下方輸入框，按 <b>Ctrl+V</b> 貼上，再點送出';
+                        
+                        // 清除上方文字框
+                        textEditor.value = '';
+                        finalTranscript = '';
+                        updateEditorState();
+                    }).catch(function(err) {
+                        // 備用方案：使用舊式方法
+                        const tempTextarea = document.createElement('textarea');
+                        tempTextarea.value = text;
+                        document.body.appendChild(tempTextarea);
+                        tempTextarea.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(tempTextarea);
+                        
+                        statusBar.className = 'status-bar done';
+                        statusText.innerHTML = '✓ <b>已複製！</b>請點擊下方輸入框，按 <b>Ctrl+V</b> 貼上，再點送出';
+                        
+                        textEditor.value = '';
+                        finalTranscript = '';
+                        updateEditorState();
+                    });
+                }
+            }
+            
+            // 監聯文字編輯
+            textEditor.addEventListener('input', updateEditorState);
+            
+            // 按 Enter 送出（Shift+Enter 換行）
+            textEditor.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!submitBtn.disabled) {
+                        submitText();
+                    }
+                }
+            });
+            
+            // 初始化狀態
+            updateEditorState();
+        </script>
+        """
+        
+        # 使用 components.html 顯示語音辨識介面
+        components.html(voice_input_html, height=280)
+        
+        # 使用 form 來處理提交
+        with st.form(key="voice_input_form", clear_on_submit=True):
+            voice_text_input = st.text_area(
+                "輸入訊息",
+                value="",
+                placeholder="👆 點擊上方「複製文字」後，在此按 Ctrl+V 貼上，再點「送出訊息」",
+                height=100,
+                label_visibility="collapsed",
+                key="voice_text_area"
+            )
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                submit_button = st.form_submit_button("✅ 送出訊息", use_container_width=True, type="primary")
+        
+        if submit_button and voice_text_input.strip():
+            prompt = voice_text_input.strip()
+        else:
+            prompt = None
+    else:
+        # 純文字模式
+        prompt = st.chat_input("請輸入您的問診內容...")
 
     # 處理輸入
     if prompt:
@@ -2074,6 +2715,10 @@ if not st.session_state.voice_mode:
         st.session_state.steps_feedback = None
         st.session_state.spikes_feedback = None
         st.session_state.shair_feedback = None
+        
+        # 語音輸入模式：清除暫存文字
+        if st.session_state.voice_input_mode:
+            st.session_state.voice_input_text = ""
         
         if detect_diagnosis_disclosure(prompt):
             st.session_state.diagnosis_disclosed = True
@@ -2098,17 +2743,64 @@ if not st.session_state.voice_mode:
                     
                     content = response.choices[0].message.content.strip()
                     annotated = annotate_with_intensity(content, st.session_state.emotion_mode)
-                    st.markdown(annotated)
+                    st.markdown(annotated, unsafe_allow_html=True)
                     st.session_state.messages.append({"role": "assistant", "content": annotated})
+                    
+                    # 語音輸入模式：使用 TTS 播放 AI 回覆
+                    if st.session_state.voice_input_mode:
+                        # 移除情緒標注符號和情緒強度標註，只保留純文字
+                        clean_text = content
+                        for emoji in ["😢", "😰", "😟", "😔", "😠", "😤", "🙁", "😐", "🤔", "💭", "😱", "😡", "😭", "😊", "🙂", "😒"]:
+                            clean_text = clean_text.replace(emoji, "")
+                        # 移除情緒強度標註和 HTML 標籤（如果有的話）
+                        import re
+                        clean_text = re.sub(r'【情緒強度：.*?】', '', clean_text)
+                        clean_text = re.sub(r'<[^>]+>', '', clean_text)  # 移除 HTML 標籤
+                        clean_text = re.sub(r'---+', '', clean_text)  # 移除分隔線
+                        clean_text = re.sub(r'\*\*[^*]+\*\*', '', clean_text)  # 移除粗體標記
+                        clean_text = clean_text.strip()
+                        
+                        # 根據教案選擇 TTS 語音
+                        # 鼻咽癌教案（吳忠明）：男性聲音 echo
+                        # 腹痛教案（長女）：女性聲音 shimmer
+                        if selected_case == "npc":
+                            tts_voice = "echo"  # 男聲，適合扮演病人吳忠明
+                        else:
+                            tts_voice = "shimmer"  # 女聲，適合扮演家屬長女
+                        
+                        # 使用 OpenAI TTS API 生成語音
+                        try:
+                            tts_response = client.audio.speech.create(
+                                model="tts-1",
+                                voice=tts_voice,
+                                input=clean_text,
+                                speed=1.0,
+                            )
+                            
+                            # 將音頻儲存到 session state，rerun 後播放
+                            import base64
+                            st.session_state.pending_tts_audio = base64.b64encode(tts_response.content).decode('utf-8')
+                            
+                        except Exception as tts_err:
+                            st.caption(f"⚠️ 語音合成失敗：{tts_err}")
                     
                 except AuthenticationError:
                     st.error("❌ OpenAI API 金鑰無效或已過期。")
                 except Exception as exc:
                     st.error(f"⚠️ 呼叫 OpenAI API 時發生錯誤：{exc}")
         
-        # 第一則訊息時 rerun，讓側邊欄計時器開始顯示
-        if is_first_message:
-            st.rerun()
+        # rerun 以更新對話顯示和清除輸入框
+        st.rerun()
+
+# 播放待播放的 TTS 音頻（在 rerun 後執行）
+if st.session_state.get("pending_tts_audio") and st.session_state.voice_input_mode:
+    audio_html = f"""
+    <audio autoplay>
+        <source src="data:audio/mp3;base64,{st.session_state.pending_tts_audio}" type="audio/mp3">
+    </audio>
+    """
+    components.html(audio_html, height=0)
+    st.session_state.pending_tts_audio = None  # 清除，避免重複播放
 
 st.divider()
 st.caption(f"📚 教案：{case_info['name']}")
