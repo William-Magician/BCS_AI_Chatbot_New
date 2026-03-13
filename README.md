@@ -11,10 +11,6 @@ OSCE 醫病溝通模擬系統（Streamlit 版本）。
 
 ## 部署（Streamlit Cloud）
 
-- 主程式入口：`app.py`
-- 機密資訊（OpenAI API Key、OAuth Token）請放在 Streamlit Cloud 的 Secrets。
-- 請勿上傳 `credentials.json`、`token.pickle`、`.streamlit/secrets.toml`。
-
 ## 專案重點
 
 - 教案模擬（鼻咽癌、腹痛家屬溝通）
