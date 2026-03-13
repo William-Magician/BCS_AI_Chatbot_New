@@ -110,7 +110,7 @@ def print_deployment_instructions(secrets_file: str):
     print("🚀 Streamlit Cloud 部署步驟")
     print("=" * 60)
     print("\n1️⃣  本地測試：")
-    print("   streamlit run app_emotion_guided.py")
+    print("   streamlit run app.py")
     print("   確認能正常連線到 Google Drive")
     print()
     print("2️⃣  部署到 Streamlit Cloud：")

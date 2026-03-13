@@ -32,7 +32,7 @@ streamlit run app_emotion...    Streamlit Cloud Settings > Secrets
 ### 第一步：本地開發與授權
 
 ```bash
-cd ~/BCS_AI_Chatbot_with_Evaluation
+cd ~/BCS_AI_Chatbot_with_Evaluation_New
 
 # 1. 確認有 credentials.json（從 GCP 下載）
 ls credentials.json
@@ -42,7 +42,7 @@ python google_drive_utils.py
 # → 瀏覽器開啟 → 授權 → token.pickle 自動建立
 
 # 3. 測試本地執行
-streamlit run app_emotion_guided.py
+streamlit run app.py
 # → ✅ 從 token.pickle 讀取 token
 # → 完成對話 → 評分 → 檔案上傳到 Drive
 ```
@@ -60,14 +60,14 @@ cat .streamlit/secrets.toml
 
 輸出範例：
 ```toml
-DRIVE_FOLDER_ID = "16HRRkutsZcscFkk4Q7XgJPEjbz3nurod"
+DRIVE_FOLDER_ID = "<your-google-drive-folder-id>"
 
 [oauth_token]
-token = "ya29.a0AfB_byC..."
-refresh_token = "1//0gHZ..."
+token = "<your-access-token>"
+refresh_token = "<your-refresh-token>"
 token_uri = "https://oauth2.googleapis.com/token"
-client_id = "721534481068-...apps.googleusercontent.com"
-client_secret = "GOCSPX-..."
+client_id = "<your-client-id>.apps.googleusercontent.com"
+client_secret = "<your-client-secret>"
 scopes = [
   "https://www.googleapis.com/auth/drive.file",
 ]
