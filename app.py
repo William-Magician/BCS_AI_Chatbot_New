@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import tempfile
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -39,7 +40,8 @@ st.set_page_config(
 # 環境與 OpenAI 初始化
 # =========================================================
 load_dotenv()
-# 改為「必須手動輸入」：不從環境變數帶入預設值，避免顯示或意外使用既有金鑰。
+# 伺服端預設 API Key（Email 模式會用這支；API Key 模式由使用者輸入）
+SERVER_API_KEY = os.getenv("OPENAI_API_KEY", "")
 MODEL_NAME = os.getenv("PATIENT_MODEL", "gpt-4.1")
 EMBEDDING_MODEL = os.getenv("PATIENT_EMBEDDING_MODEL", "text-embedding-3-large")
 EVALUATION_MODEL = os.getenv("PATIENT_EVALUATION_MODEL", "gpt-4.1")
@@ -87,6 +89,14 @@ if "case_confirmed" not in st.session_state:
     st.session_state.case_confirmed = False
 if "openai_api_key" not in st.session_state:
     st.session_state.openai_api_key = ""
+if "auth_mode" not in st.session_state:
+    st.session_state.auth_mode = "api_key"  # api_key | email
+if "is_authenticated" not in st.session_state:
+    st.session_state.is_authenticated = False
+if "auth_user_email" not in st.session_state:
+    st.session_state.auth_user_email = ""
+if "active_api_key" not in st.session_state:
+    st.session_state.active_api_key = ""
 
 # 使用者身分相關的 session state
 if "user_identity" not in st.session_state:
@@ -119,6 +129,10 @@ def reset_to_case_selection():
     """返回教案選擇頁面"""
     st.session_state.selected_case = None
     st.session_state.case_confirmed = False
+    st.session_state.is_authenticated = False
+    st.session_state.auth_user_email = ""
+    st.session_state.active_api_key = ""
+    st.session_state.auth_mode = "api_key"
     # 清除其他對話相關的 session state
     keys_to_clear = [
         "messages", "emotion_mode", "stage", "student_level",
@@ -148,24 +162,83 @@ def reset_voice_mode():
     st.session_state.shair_feedback = None
 
 
+def _hash_password(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def verify_user(email: str, password: str) -> bool:
+    users = {}
+    try:
+        users = st.secrets.get("auth_users", {}) or {}
+    except Exception:
+        users = {}
+    stored = users.get(email)
+    if not stored:
+        return False
+    pw = password or ""
+    if stored.startswith("sha256:"):
+        return _hash_password(pw) == stored.replace("sha256:", "", 1)
+    if stored.startswith("plain:"):
+        return pw == stored.replace("plain:", "", 1)
+    return pw == stored
+
+
 # =========================================================
 # 教案選擇頁面
 # =========================================================
 if not st.session_state.case_confirmed:
     st.title("🏥 OSCE 醫病對話模擬器")
     st.markdown("---")
+    st.subheader("🔐 登入方式")
+    st.session_state.auth_mode = st.radio(
+        "選擇登入方式",
+        options=["api_key", "email"],
+        format_func=lambda x: "API Key" if x == "api_key" else "Email",
+        horizontal=True,
+    )
 
-    # 手動輸入 OpenAI API Key（必填）
-    st.subheader("🔑 請先輸入 OpenAI API Key")
-    st.session_state.openai_api_key = st.text_input(
-        "OpenAI API Key",
-        value=st.session_state.openai_api_key or "",
-        type="password",
-        help="為避免金鑰被寫入檔案，本 App 改為由使用者手動輸入後才啟用。",
-    ).strip()
-    has_api_key = bool(st.session_state.openai_api_key)
-    if not has_api_key:
-        st.info("尚未輸入 API Key：請先輸入後再選擇教案。")
+    if st.session_state.auth_mode == "api_key":
+        st.session_state.openai_api_key = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.openai_api_key if st.session_state.is_authenticated else "",
+            type="password",
+            help="僅本機使用，不會寫入檔案。",
+        ).strip()
+        if st.button("使用此 API Key", type="primary"):
+            if st.session_state.openai_api_key:
+                st.session_state.active_api_key = st.session_state.openai_api_key
+                st.session_state.is_authenticated = True
+                st.session_state.auth_user_email = ""
+                st.success("已啟用 API Key 模式")
+            else:
+                st.error("請輸入有效的 API Key")
+    else:
+        if not SERVER_API_KEY:
+            st.error("伺服端未設定 OPENAI_API_KEY，無法使用 Email 登入。請改用 API Key 模式。")
+        email = st.text_input("Email", value=st.session_state.auth_user_email)
+        password = st.text_input("密碼", type="password")
+        if st.button("登入", type="primary"):
+            if not email or not password:
+                st.warning("請輸入 Email 與密碼")
+            elif verify_user(email, password):
+                st.session_state.is_authenticated = True
+                st.session_state.auth_user_email = email
+                st.session_state.active_api_key = SERVER_API_KEY
+                st.success(f"已以 {email} 登入，小組金鑰已啟用")
+            else:
+                st.error("帳號或密碼錯誤")
+
+    if st.session_state.is_authenticated:
+        st.info(
+            f"登入方式：{'API Key' if st.session_state.auth_mode == 'api_key' else 'Email'}"
+            + (f"｜使用者：{st.session_state.auth_user_email}" if st.session_state.auth_user_email else "")
+        )
+        if st.button("登出", type="secondary"):
+            st.session_state.is_authenticated = False
+            st.session_state.auth_user_email = ""
+            st.session_state.active_api_key = ""
+            st.session_state.auth_mode = "api_key"
+            st.rerun()
 
     # 使用者身分選單
     st.subheader("👤 使用者資訊")
@@ -218,7 +291,7 @@ if not st.session_state.case_confirmed:
                     key=f"select_{case_id}",
                     type="primary",
                     use_container_width=True,
-                    disabled=not has_api_key,
+                    disabled=not st.session_state.is_authenticated or not st.session_state.active_api_key,
                 ):
                     st.session_state.selected_case = case_id
                     st.session_state.case_confirmed = True
@@ -232,10 +305,10 @@ if not st.session_state.case_confirmed:
 # 以下是選擇教案後的對話邏輯
 # =========================================================
 
-# 檢查 API Key（改為手動輸入）
-API_KEY = (st.session_state.get("openai_api_key") or "").strip()
-if not API_KEY:
-    st.error("❌ 尚未輸入 OpenAI API Key，請返回上一頁輸入後再使用。")
+# 取得實際使用的 API Key（依登入模式）
+API_KEY = (st.session_state.get("active_api_key") or "").strip()
+if not API_KEY or not st.session_state.is_authenticated:
+    st.error("❌ 尚未登入或未設定 API Key，請返回上一頁完成登入。")
     st.stop()
 
 try:
@@ -830,6 +903,25 @@ def annotate_with_intensity(content: str, emotion_mode: str) -> str:
     return f"{clean_content}\n\n{emotion_html}"
 
 
+def _strip_visual_tags(content: str) -> str:
+    """移除情緒卡片/HTML 標籤，留下純文字對話"""
+    import re
+    if not content:
+        return ""
+    text = content
+    # 移除 HTML 標籤
+    text = re.sub(r"<[^>]+>", "", text)
+    # 移除情緒卡片相關行
+    lines = []
+    for line in text.splitlines():
+        if any(key in line for key in ("情緒狀態：", "強度：", "💭")):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
 def compose_system_prompt(latest_user_text: str) -> str:
     """組合系統提示詞"""
     emotion_mode = st.session_state.emotion_mode
@@ -876,7 +968,7 @@ def _format_conversation_for_model(messages) -> str:
     lines = []
     for idx, msg in enumerate(messages, start=1):
         role = "醫學生" if msg.get("role") == "user" else ROLE_LABEL
-        content = msg.get("content", "").strip()
+        content = _strip_visual_tags(msg.get("content", "").strip())
         lines.append(f"{idx}. {role}: {content}")
     return "\n".join(lines)
 
@@ -1248,7 +1340,7 @@ def format_conversation_for_txt(messages):
     transcript.append("=" * 50)
     for msg in messages:
         role = "醫學生" if msg["role"] == "user" else ROLE_LABEL
-        transcript.append(f"({role})\n{msg['content']}\n")
+        transcript.append(f"({role})\n{_strip_visual_tags(msg['content'])}\n")
     return "\n".join(transcript)
 
 
