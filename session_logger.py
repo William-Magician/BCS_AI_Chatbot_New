@@ -6,6 +6,7 @@ Session Logger & Google Drive Uploader
 import json
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,10 +34,27 @@ class SessionLogger:
         self.logs_dir.mkdir(exist_ok=True)
         self.drive_folder_id = drive_folder_id
         self.drive_service = None
+        self.tz = ZoneInfo("Asia/Taipei")
         
         # 嘗試初始化 Google Drive service
         if GOOGLE_DRIVE_AVAILABLE and drive_folder_id:
             self._init_drive_service()
+
+    @staticmethod
+    def _strip_visual_tags(content: str) -> str:
+        """移除情緒卡片/HTML，保留純文字"""
+        import re
+        if not content:
+            return ""
+        text = re.sub(r"<[^>]+>", "", content)
+        lines = []
+        for line in text.splitlines():
+            if any(key in line for key in ("情緒狀態：", "強度：", "💭")):
+                continue
+            lines.append(line)
+        text = "\n".join(lines)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text
     
     def _init_drive_service(self):
         """
@@ -104,7 +122,15 @@ class SessionLogger:
             記錄檔案的路徑，若失敗則回傳 None
         """
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            now = datetime.now(self.tz)
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+            # 先淨化訊息，移除情緒卡片/HTML
+            cleaned_messages: List[Dict[str, str]] = []
+            for msg in messages:
+                content = msg.get("content", "")
+                cleaned = self._strip_visual_tags(content)
+                cleaned_messages.append({**msg, "content": cleaned})
             
             # 根據教案產生檔名前綴
             case_prefix = ""
@@ -126,7 +152,7 @@ class SessionLogger:
             
             payload = {
                 "timestamp": timestamp,
-                "datetime": datetime.now().isoformat(),
+                "datetime": now.isoformat(),
                 "case_id": case_id,
                 "case_name": case_name,
                 "user_info": user_info or {},
@@ -136,7 +162,7 @@ class SessionLogger:
                 "diagnosis_disclosed": diagnosis_disclosed,
                 "conversation_seconds": conversation_seconds,
                 "conversation_minutes": round(conversation_seconds / 60, 2),
-                "messages": messages,
+                "messages": cleaned_messages,
                 "evaluation": evaluation.get("structured") if evaluation else None,
                 "evaluation_raw": evaluation.get("raw_text") if evaluation else None,
                 "shair_feedback": shair_feedback,
@@ -258,7 +284,7 @@ class SessionLogger:
         # 3. 儲存並上傳 combined report (txt)
         if combined_report_bytes:
             try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = datetime.now(self.tz).strftime("%Y%m%d_%H%M%S")
                 report_filename = self.logs_dir / f"{case_prefix}report_{timestamp}{user_suffix}.txt"
                 report_filename.write_bytes(combined_report_bytes)
                 
