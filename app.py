@@ -2377,8 +2377,13 @@ elif st.session_state.last_evaluation:
     if not st.session_state.logged_this_session:
         with st.spinner("正在儲存記錄並上傳到 Google Drive..."):
             try:
+                # 建立淨化後的訊息（移除情緒卡片/HTML）供 log 使用
+                cleaned_messages = [
+                    {**msg, "content": _strip_visual_tags(msg.get("content", ""))}
+                    for msg in st.session_state.messages
+                ]
                 result = session_logger.log_and_upload(
-                    messages=st.session_state.messages,
+                    messages=cleaned_messages,
                     evaluation=latest_eval,
                     stage=st.session_state.stage,
                     emotion_mode=st.session_state.emotion_mode,
