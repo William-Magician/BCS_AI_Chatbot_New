@@ -13,6 +13,7 @@ import time
 import tempfile
 import hashlib
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -48,6 +49,7 @@ EVALUATION_MODEL = os.getenv("PATIENT_EVALUATION_MODEL", "gpt-4.1")
 ADMIN_ACCESS_CODE = os.getenv("CHATBOT_ADMIN_CODE", "")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+TZ = ZoneInfo("Asia/Taipei")
 
 # =========================================================
 # 教案選項
@@ -2221,7 +2223,7 @@ if st.session_state.pending_evaluation:
             try:
                 evaluation_result = generate_conversation_evaluation(st.session_state.messages)
                 st.session_state.last_evaluation = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "timestamp": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
                     "structured": evaluation_result["structured"],
                     "raw_text": evaluation_result["raw_text"],
                 }
@@ -2367,7 +2369,7 @@ elif st.session_state.last_evaluation:
     st.download_button(
         "📥 下載對話及評分回饋",
         data=combined_bytes,
-        file_name=f"{case_prefix}_評分回饋_{datetime.now().strftime('%Y%m%d_%H%M%S')}{user_suffix}.txt",
+        file_name=f"{case_prefix}_評分回饋_{datetime.now(TZ).strftime('%Y%m%d_%H%M%S')}{user_suffix}.txt",
         mime="text/plain",
     )
     
